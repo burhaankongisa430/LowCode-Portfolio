@@ -1,0 +1,144 @@
+{
+  "properties": {
+    "displayName": "PROC-04 Rejection Notification & Budget Release",
+    "description": "Called when an approval decision is Reject at any level. Updates QB status to Rejected, releases the budget commitment, emails the requestor with the rejection reason and next steps.",
+    "state": "Started",
+    "definition": {
+      "$schema": "https://schema.management.azure.com/providers/Microsoft.Logic/schemas/2016-06-01/workflowdefinition.json#",
+      "contentVersion": "1.0.0.0",
+      "parameters": {
+        "$connections":        { "defaultValue": {}, "type": "Object" },
+        "$authentication":     { "defaultValue": {}, "type": "SecureObject" },
+        "QBRealmHostname":     { "defaultValue": "yourcompany.quickbase.com", "type": "String" },
+        "QBUserToken":         { "defaultValue": "", "type": "SecureString" },
+        "QBRequestsTableId":   { "defaultValue": "", "type": "String" },
+        "QBApprovalHistoryId": { "defaultValue": "", "type": "String" },
+        "BudgetReleaseUrl":    { "defaultValue": "", "type": "String" }
+      },
+      "triggers": {
+        "When_HTTP_Request_Received": {
+          "type": "Request",
+          "kind": "Http",
+          "inputs": {
+            "schema": {
+              "type": "object",
+              "required": ["requestRecordId", "requestNumber", "requestorEmail", "rejectedBy", "rejectionLevel"],
+              "properties": {
+                "requestRecordId":  { "type": "integer" },
+                "requestNumber":    { "type": "string" },
+                "title":            { "type": "string" },
+                "totalAmount":      { "type": "number" },
+                "requestorName":    { "type": "string" },
+                "requestorEmail":   { "type": "string" },
+                "rejectedBy":       { "type": "string" },
+                "rejectionLevel":   { "type": "integer" },
+                "rejectionReason":  { "type": "string" }
+              }
+            }
+          }
+        }
+      },
+      "actions": {
+
+        "Set_Level_Label": {
+          "type": "Compose",
+          "runAfter": {},
+          "inputs": "@switch(triggerBody()?['rejectionLevel'], 1, 'Line Manager', 2, 'Department Head', 3, 'Finance Director', 4, 'CEO', 'Approver')"
+        },
+
+        "Update_QB_Rejected": {
+          "type": "Http",
+          "runAfter": { "Set_Level_Label": ["Succeeded"] },
+          "inputs": {
+            "method": "POST",
+            "uri": "https://api.quickbase.com/v1/records",
+            "headers": {
+              "QB-Realm-Hostname": "@parameters('QBRealmHostname')",
+              "Authorization": "QB-USER-TOKEN @{parameters('QBUserToken')}",
+              "Content-Type": "application/json"
+            },
+            "body": {
+              "to": "@parameters('QBRequestsTableId')",
+              "data": [{
+                "3":  { "value": "@triggerBody()?['requestRecordId']" },
+                "19": { "value": "Rejected" },
+                "28": { "value": "@triggerBody()?['rejectedBy']" },
+                "29": { "value": "@triggerBody()?['rejectionReason']" }
+              }]
+            }
+          }
+        },
+
+        "Log_Rejection_to_History": {
+          "type": "Http",
+          "runAfter": { "Update_QB_Rejected": ["Succeeded"] },
+          "inputs": {
+            "method": "POST",
+            "uri": "https://api.quickbase.com/v1/records",
+            "headers": {
+              "QB-Realm-Hostname": "@parameters('QBRealmHostname')",
+              "Authorization": "QB-USER-TOKEN @{parameters('QBUserToken')}",
+              "Content-Type": "application/json"
+            },
+            "body": {
+              "to": "@parameters('QBApprovalHistoryId')",
+              "data": [{
+                "6":  { "value": "@triggerBody()?['requestRecordId']" },
+                "7":  { "value": "@triggerBody()?['rejectionLevel']" },
+                "8":  { "value": "@triggerBody()?['rejectedBy']" },
+                "10": { "value": "Rejected" },
+                "11": { "value": "@triggerBody()?['rejectionReason']" },
+                "12": { "value": "@utcNow()" },
+                "15": { "value": "Email" }
+              }]
+            }
+          }
+        },
+
+        "Release_Budget_Commitment": {
+          "type": "Http",
+          "runAfter": { "Log_Rejection_to_History": ["Succeeded"] },
+          "inputs": {
+            "method": "POST",
+            "uri": "@parameters('BudgetReleaseUrl')",
+            "body": {
+              "requestRecordId": "@triggerBody()?['requestRecordId']",
+              "totalAmount":     "@triggerBody()?['totalAmount']",
+              "action":          "release"
+            }
+          }
+        },
+
+        "Email_Requestor_Rejection": {
+          "type": "ApiConnection",
+          "runAfter": { "Release_Budget_Commitment": ["Succeeded", "Failed"] },
+          "inputs": {
+            "host": { "connection": { "name": "@parameters('$connections')['office365']['connectionId']" } },
+            "method": "post",
+            "path": "/v2/Mail/Send",
+            "body": {
+              "To": "@triggerBody()?['requestorEmail']",
+              "Subject": "❌ Purchase Request Declined: @{triggerBody()?['requestNumber']}",
+              "Body": "<div style='font-family:Arial,sans-serif;max-width:600px'><div style='background:#E74C3C;padding:16px;border-radius:8px 8px 0 0'><h2 style='color:#fff;margin:0'>Purchase Request Declined</h2></div><div style='padding:20px;border:1px solid #eee;border-radius:0 0 8px 8px'><p>Hi @{triggerBody()?['requestorName']},</p><p>Your purchase request has been declined. The details are below.</p><table style='border-collapse:collapse;width:100%'><tr><td style='padding:8px;font-weight:bold;background:#f8f8f8'>Request Number</td><td style='padding:8px'>@{triggerBody()?['requestNumber']}</td></tr><tr><td style='padding:8px;font-weight:bold'>Description</td><td style='padding:8px'>@{triggerBody()?['title']}</td></tr><tr><td style='padding:8px;font-weight:bold;background:#f8f8f8'>Amount</td><td style='padding:8px'>R @{triggerBody()?['totalAmount']}</td></tr><tr><td style='padding:8px;font-weight:bold'>Declined By</td><td style='padding:8px'>@{triggerBody()?['rejectedBy']} (@{outputs('Set_Level_Label')})</td></tr><tr style='background:#fce4e4'><td style='padding:8px;font-weight:bold'>Reason</td><td style='padding:8px'>@{coalesce(triggerBody()?['rejectionReason'], 'No reason provided.')}</td></tr></table><h3>What can you do next?</h3><ul><li>Review the rejection reason and address the concern raised.</li><li>If the justification can be strengthened, resubmit with additional documentation (quotes, business case).</li><li>If you believe this was declined in error, contact your line manager directly.</li><li>Budget commitments for this request have been released.</li></ul><p>If you have questions, please contact the Finance team.</p></div></div>",
+              "IsHtml": true
+            }
+          }
+        },
+
+        "Return_Success": {
+          "type": "Response",
+          "runAfter": { "Email_Requestor_Rejection": ["Succeeded"] },
+          "inputs": {
+            "statusCode": 200,
+            "body": {
+              "result":        "Rejection processed",
+              "requestNumber": "@triggerBody()?['requestNumber']",
+              "rejectionLevel":"@triggerBody()?['rejectionLevel']"
+            }
+          }
+        }
+
+      }
+    }
+  }
+}

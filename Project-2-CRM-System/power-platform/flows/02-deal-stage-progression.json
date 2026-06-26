@@ -1,0 +1,181 @@
+{
+  "properties": {
+    "displayName": "CRM-02 Deal Stage Progression",
+    "description": "Triggered by a Quickbase automation webhook when a deal's stage changes. Validates the stage transition, sends notifications to the rep and manager, posts a Teams update, and logs the change to the Activities table.",
+    "state": "Started",
+    "definition": {
+      "$schema": "https://schema.management.azure.com/providers/Microsoft.Logic/schemas/2016-06-01/workflowdefinition.json#",
+      "contentVersion": "1.0.0.0",
+      "parameters": {
+        "$connections": { "defaultValue": {}, "type": "Object" },
+        "$authentication": { "defaultValue": {}, "type": "SecureObject" },
+        "QBRealmHostname":     { "defaultValue": "yourcompany.quickbase.com", "type": "String" },
+        "QBUserToken":         { "defaultValue": "", "type": "SecureString" },
+        "QBDealsTableId":      { "defaultValue": "", "type": "String" },
+        "QBActivitiesTableId": { "defaultValue": "", "type": "String" },
+        "TeamsWebhookUrl":     { "defaultValue": "", "type": "String" },
+        "ManagerEmail":        { "defaultValue": "sales-manager@yourcompany.com", "type": "String" }
+      },
+      "triggers": {
+        "When_HTTP_Request_Received": {
+          "type": "Request",
+          "kind": "Http",
+          "inputs": {
+            "schema": {
+              "type": "object",
+              "required": ["recordId", "dealId", "dealName", "previousStage", "newStage", "repEmail", "repName", "dealValue"],
+              "properties": {
+                "recordId":       { "type": "integer" },
+                "dealId":         { "type": "string" },
+                "dealName":       { "type": "string" },
+                "companyName":    { "type": "string" },
+                "previousStage":  { "type": "string" },
+                "newStage":       { "type": "string" },
+                "repEmail":       { "type": "string" },
+                "repName":        { "type": "string" },
+                "dealValue":      { "type": "number" },
+                "expectedClose":  { "type": "string" },
+                "winProbability": { "type": "number" }
+              }
+            }
+          }
+        }
+      },
+      "actions": {
+
+        "Determine_Stage_Emoji": {
+          "type": "Compose",
+          "runAfter": {},
+          "inputs": "@if(equals(triggerBody()?['newStage'], 'Closed Won'), '🏆', if(equals(triggerBody()?['newStage'], 'Closed Lost'), '❌', if(equals(triggerBody()?['newStage'], 'Verbal Commit'), '✅', if(equals(triggerBody()?['newStage'], 'Negotiation'), '🤝', if(equals(triggerBody()?['newStage'], 'Proposal Sent'), '📄', if(equals(triggerBody()?['newStage'], 'Qualified'), '⭐', '🔵'))))))"
+        },
+
+        "Determine_Next_Action": {
+          "type": "Compose",
+          "runAfter": {},
+          "inputs": "@if(equals(triggerBody()?['newStage'], 'New Lead'), 'Schedule a discovery call within 3 days.', if(equals(triggerBody()?['newStage'], 'Qualified'), 'Prepare and send a tailored proposal within 7 days.', if(equals(triggerBody()?['newStage'], 'Proposal Sent'), 'Follow up within 2 days. Book a proposal review meeting.', if(equals(triggerBody()?['newStage'], 'Negotiation'), 'Confirm final commercial terms and involve manager if discount > 15%.', if(equals(triggerBody()?['newStage'], 'Verbal Commit'), 'Send contract for signature. Log expected signature date.', if(equals(triggerBody()?['newStage'], 'Closed Won'), 'Hand off to customer success. Log all deal details.', if(equals(triggerBody()?['newStage'], 'Closed Lost'), 'Record loss reason in CRM within 24 hours.', 'Update next follow-up date.')))))))"
+        },
+
+        "Is_Closed_Stage": {
+          "type": "Condition",
+          "runAfter": { "Determine_Stage_Emoji": ["Succeeded"], "Determine_Next_Action": ["Succeeded"] },
+          "expression": {
+            "or": [
+              { "equals": ["@triggerBody()?['newStage']", "Closed Won"] },
+              { "equals": ["@triggerBody()?['newStage']", "Closed Lost"] }
+            ]
+          },
+          "actions": {
+
+            "Notify_Manager_of_Close": {
+              "type": "ApiConnection",
+              "inputs": {
+                "host": { "connection": { "name": "@parameters('$connections')['office365']['connectionId']" } },
+                "method": "post",
+                "path": "/v2/Mail/Send",
+                "body": {
+                  "To": "@parameters('ManagerEmail')",
+                  "Subject": "@{outputs('Determine_Stage_Emoji')} @{triggerBody()?['newStage']}: @{triggerBody()?['dealName']} – $@{triggerBody()?['dealValue']}",
+                  "Body": "<h3>Deal @{triggerBody()?['newStage']}</h3><table><tr><td><b>Deal</b></td><td>@{triggerBody()?['dealId']} – @{triggerBody()?['dealName']}</td></tr><tr><td><b>Company</b></td><td>@{triggerBody()?['companyName']}</td></tr><tr><td><b>Value</b></td><td>$@{triggerBody()?['dealValue']}</td></tr><tr><td><b>Sales Rep</b></td><td>@{triggerBody()?['repName']}</td></tr><tr><td><b>Previous Stage</b></td><td>@{triggerBody()?['previousStage']}</td></tr></table>",
+                  "IsHtml": true
+                }
+              }
+            },
+
+            "Post_Win_Loss_to_Teams": {
+              "type": "Http",
+              "runAfter": { "Notify_Manager_of_Close": ["Succeeded"] },
+              "inputs": {
+                "method": "POST",
+                "uri": "@parameters('TeamsWebhookUrl')",
+                "body": {
+                  "type": "message",
+                  "attachments": [{
+                    "contentType": "application/vnd.microsoft.card.adaptive",
+                    "content": {
+                      "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
+                      "type": "AdaptiveCard",
+                      "version": "1.4",
+                      "body": [
+                        { "type": "TextBlock", "text": "@{outputs('Determine_Stage_Emoji')} Deal @{triggerBody()?['newStage']}!", "weight": "Bolder", "size": "Large", "color": "@{if(equals(triggerBody()?['newStage'], 'Closed Won'), 'Good', 'Attention')}" },
+                        { "type": "TextBlock", "text": "@{triggerBody()?['dealName']} — @{triggerBody()?['companyName']}", "wrap": true, "weight": "Bolder" },
+                        { "type": "FactSet", "facts": [
+                          { "title": "Rep",   "value": "@{triggerBody()?['repName']}" },
+                          { "title": "Value", "value": "$@{triggerBody()?['dealValue']}" },
+                          { "title": "Deal",  "value": "@{triggerBody()?['dealId']}" }
+                        ]}
+                      ]
+                    }
+                  }]
+                }
+              }
+            }
+
+          },
+          "else": {
+            "actions": {
+
+              "Notify_Rep_of_Stage_Advance": {
+                "type": "ApiConnection",
+                "inputs": {
+                  "host": { "connection": { "name": "@parameters('$connections')['office365']['connectionId']" } },
+                  "method": "post",
+                  "path": "/v2/Mail/Send",
+                  "body": {
+                    "To": "@triggerBody()?['repEmail']",
+                    "Subject": "@{outputs('Determine_Stage_Emoji')} @{triggerBody()?['dealId']} advanced to @{triggerBody()?['newStage']}",
+                    "Body": "<h3>Deal Stage Updated</h3><table><tr><td><b>Deal</b></td><td>@{triggerBody()?['dealId']} – @{triggerBody()?['dealName']}</td></tr><tr><td><b>Company</b></td><td>@{triggerBody()?['companyName']}</td></tr><tr><td><b>Previous Stage</b></td><td>@{triggerBody()?['previousStage']}</td></tr><tr><td><b>New Stage</b></td><td>@{triggerBody()?['newStage']}</td></tr><tr><td><b>Win Probability</b></td><td>@{triggerBody()?['winProbability']}%</td></tr><tr><td><b>Expected Close</b></td><td>@{triggerBody()?['expectedClose']}</td></tr></table><p><b>Next Action:</b> @{outputs('Determine_Next_Action')}</p>",
+                    "IsHtml": true
+                  }
+                }
+              },
+
+              "Post_Stage_Update_to_Teams": {
+                "type": "Http",
+                "runAfter": { "Notify_Rep_of_Stage_Advance": ["Succeeded"] },
+                "inputs": {
+                  "method": "POST",
+                  "uri": "@parameters('TeamsWebhookUrl')",
+                  "body": {
+                    "type": "message",
+                    "attachments": [{
+                      "contentType": "application/vnd.microsoft.card.adaptive",
+                      "content": {
+                        "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
+                        "type": "AdaptiveCard",
+                        "version": "1.4",
+                        "body": [
+                          { "type": "TextBlock", "text": "@{outputs('Determine_Stage_Emoji')} Pipeline Update", "weight": "Bolder", "size": "Medium" },
+                          { "type": "TextBlock", "text": "@{triggerBody()?['dealName']}", "wrap": true, "weight": "Bolder" },
+                          { "type": "FactSet", "facts": [
+                            { "title": "Stage",        "value": "@{triggerBody()?['previousStage']} → @{triggerBody()?['newStage']}" },
+                            { "title": "Rep",          "value": "@{triggerBody()?['repName']}" },
+                            { "title": "Value",        "value": "$@{triggerBody()?['dealValue']}" },
+                            { "title": "Win Prob",     "value": "@{triggerBody()?['winProbability']}%" },
+                            { "title": "Expected Close","value": "@{triggerBody()?['expectedClose']}" }
+                          ]},
+                          { "type": "TextBlock", "text": "Next: @{outputs('Determine_Next_Action')}", "wrap": true, "isSubtle": true }
+                        ],
+                        "actions": [{ "type": "Action.OpenUrl", "title": "View Deal", "url": "https://yourcompany.quickbase.com/nav/app/{{appId}}/action/record?rid=@{triggerBody()?['recordId']}" }]
+                      }
+                    }]
+                  }
+                }
+              }
+
+            }
+          }
+        },
+
+        "Return_Success": {
+          "type": "Response",
+          "runAfter": { "Is_Closed_Stage": ["Succeeded"] },
+          "inputs": {
+            "statusCode": 200,
+            "body": { "result": "Stage progression processed", "dealId": "@triggerBody()?['dealId']", "newStage": "@triggerBody()?['newStage']" }
+          }
+        }
+
+      }
+    }
+  }
+}

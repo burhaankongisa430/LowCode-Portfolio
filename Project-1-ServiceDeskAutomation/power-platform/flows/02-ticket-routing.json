@@ -1,0 +1,241 @@
+{
+  "properties": {
+    "displayName": "SD-02 Intelligent Ticket Routing",
+    "description": "Triggered by Quickbase automation when a new ticket is created. Finds the best available agent in the correct team, assigns the ticket, and notifies the agent via Teams and email.",
+    "state": "Started",
+    "definition": {
+      "$schema": "https://schema.management.azure.com/providers/Microsoft.Logic/schemas/2016-06-01/workflowdefinition.json#",
+      "contentVersion": "1.0.0.0",
+      "parameters": {
+        "$connections": { "defaultValue": {}, "type": "Object" },
+        "$authentication": { "defaultValue": {}, "type": "SecureObject" },
+        "QBRealmHostname": { "defaultValue": "yourcompany.quickbase.com", "type": "String" },
+        "QBUserToken": { "defaultValue": "", "type": "SecureString" },
+        "QBTicketsTableId": { "defaultValue": "", "type": "String" },
+        "QBAgentsTableId": { "defaultValue": "", "type": "String" }
+      },
+      "triggers": {
+        "When_HTTP_Request_Received": {
+          "type": "Request",
+          "kind": "Http",
+          "inputs": {
+            "schema": {
+              "type": "object",
+              "required": ["ticketId", "category", "priority", "routingTeam", "submitterEmail", "submitterName", "dueDate"],
+              "properties": {
+                "ticketId":      { "type": "string" },
+                "recordId":      { "type": "integer" },
+                "title":         { "type": "string" },
+                "category":      { "type": "string" },
+                "priority":      { "type": "string" },
+                "routingTeam":   { "type": "string" },
+                "submitterEmail":{ "type": "string" },
+                "submitterName": { "type": "string" },
+                "dueDate":       { "type": "string" }
+              }
+            }
+          }
+        }
+      },
+      "actions": {
+
+        "Query_Available_Agents": {
+          "type": "Http",
+          "runAfter": {},
+          "inputs": {
+            "method": "POST",
+            "uri": "https://api.quickbase.com/v1/records/query",
+            "headers": {
+              "QB-Realm-Hostname": "@parameters('QBRealmHostname')",
+              "Authorization": "QB-USER-TOKEN @{parameters('QBUserToken')}",
+              "Content-Type": "application/json"
+            },
+            "body": {
+              "from": "@parameters('QBAgentsTableId')",
+              "select": [3, 6, 7, 8, 10, 12],
+              "where": "{8.EX.'@{triggerBody()?['routingTeam']}'} AND {11.EX.'true'} AND {13.NEX.'At Capacity'}",
+              "sortBy": [{ "fieldId": 12, "order": "ASC" }],
+              "options": { "top": 1 }
+            }
+          }
+        },
+
+        "Parse_Agents_Response": {
+          "type": "ParseJson",
+          "runAfter": { "Query_Available_Agents": ["Succeeded"] },
+          "inputs": {
+            "content": "@body('Query_Available_Agents')",
+            "schema": {
+              "type": "object",
+              "properties": {
+                "data": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "3":  { "type": "object", "properties": { "value": { "type": "integer" } } },
+                      "6":  { "type": "object", "properties": { "value": { "type": "string" } } },
+                      "7":  { "type": "object", "properties": { "value": { "type": "string" } } },
+                      "8":  { "type": "object", "properties": { "value": { "type": "string" } } },
+                      "10": { "type": "object", "properties": { "value": { "type": "integer" } } },
+                      "12": { "type": "object", "properties": { "value": { "type": "integer" } } }
+                    }
+                  }
+                },
+                "metadata": { "type": "object", "properties": { "numRecords": { "type": "integer" } } }
+              }
+            }
+          }
+        },
+
+        "Agent_Found": {
+          "type": "Condition",
+          "runAfter": { "Parse_Agents_Response": ["Succeeded"] },
+          "expression": {
+            "and": [
+              { "greater": ["@body('Parse_Agents_Response')?['metadata']?['numRecords']", 0] }
+            ]
+          },
+          "actions": {
+
+            "Set_Agent_Details": {
+              "type": "Compose",
+              "inputs": {
+                "agentRecordId": "@body('Parse_Agents_Response')?['data'][0]['3']['value']",
+                "agentName":     "@body('Parse_Agents_Response')?['data'][0]['6']['value']",
+                "agentEmail":    "@body('Parse_Agents_Response')?['data'][0]['7']['value']"
+              }
+            },
+
+            "Assign_Ticket_in_QB": {
+              "type": "Http",
+              "runAfter": { "Set_Agent_Details": ["Succeeded"] },
+              "inputs": {
+                "method": "POST",
+                "uri": "https://api.quickbase.com/v1/records",
+                "headers": {
+                  "QB-Realm-Hostname": "@parameters('QBRealmHostname')",
+                  "Authorization": "QB-USER-TOKEN @{parameters('QBUserToken')}",
+                  "Content-Type": "application/json"
+                },
+                "body": {
+                  "to": "@parameters('QBTicketsTableId')",
+                  "data": [
+                    {
+                      "3":  { "value": "@triggerBody()?['recordId']" },
+                      "11": { "value": "Assigned" },
+                      "14": { "value": "@outputs('Set_Agent_Details')?['agentRecordId']" },
+                      "15": { "value": "@triggerBody()?['routingTeam']" }
+                    }
+                  ]
+                }
+              }
+            },
+
+            "Notify_Agent_via_Email": {
+              "type": "ApiConnection",
+              "runAfter": { "Assign_Ticket_in_QB": ["Succeeded"] },
+              "inputs": {
+                "host": { "connection": { "name": "@parameters('$connections')['office365']['connectionId']" } },
+                "method": "post",
+                "path": "/v2/Mail/Send",
+                "body": {
+                  "To": "@outputs('Set_Agent_Details')?['agentEmail']",
+                  "Subject": "New Ticket Assigned: @{triggerBody()?['ticketId']} [@{triggerBody()?['priority']}]",
+                  "Body": "<h3>New Ticket Assigned to You</h3><table style='border-collapse:collapse'><tr><td style='padding:4px 8px;font-weight:bold'>Ticket ID</td><td style='padding:4px 8px'>@{triggerBody()?['ticketId']}</td></tr><tr><td style='padding:4px 8px;font-weight:bold'>Title</td><td style='padding:4px 8px'>@{triggerBody()?['title']}</td></tr><tr><td style='padding:4px 8px;font-weight:bold'>Priority</td><td style='padding:4px 8px'>@{triggerBody()?['priority']}</td></tr><tr><td style='padding:4px 8px;font-weight:bold'>Category</td><td style='padding:4px 8px'>@{triggerBody()?['category']}</td></tr><tr><td style='padding:4px 8px;font-weight:bold'>Submitter</td><td style='padding:4px 8px'>@{triggerBody()?['submitterName']} (@{triggerBody()?['submitterEmail']})</td></tr><tr><td style='padding:4px 8px;font-weight:bold'>SLA Due</td><td style='padding:4px 8px;color:red'>@{triggerBody()?['dueDate']}</td></tr></table>",
+                  "IsHtml": true
+                }
+              }
+            },
+
+            "Post_Teams_Card_to_Agent": {
+              "type": "Http",
+              "runAfter": { "Notify_Agent_via_Email": ["Succeeded"] },
+              "inputs": {
+                "method": "POST",
+                "uri": "https://graph.microsoft.com/v1.0/chats/{chatId}/messages",
+                "authentication": { "type": "ManagedServiceIdentity" },
+                "body": {
+                  "body": {
+                    "contentType": "html",
+                    "content": "<attachment id='ticketCard'></attachment>"
+                  },
+                  "attachments": [
+                    {
+                      "id": "ticketCard",
+                      "contentType": "application/vnd.microsoft.card.adaptive",
+                      "content": {
+                        "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
+                        "type": "AdaptiveCard",
+                        "version": "1.3",
+                        "body": [
+                          { "type": "TextBlock", "text": "New Ticket Assigned", "weight": "Bolder", "size": "Medium" },
+                          { "type": "FactSet", "facts": [
+                            { "title": "Ticket", "value": "@{triggerBody()?['ticketId']}" },
+                            { "title": "Priority", "value": "@{triggerBody()?['priority']}" },
+                            { "title": "Category", "value": "@{triggerBody()?['category']}" },
+                            { "title": "SLA Due", "value": "@{triggerBody()?['dueDate']}" }
+                          ]}
+                        ],
+                        "actions": [
+                          { "type": "Action.OpenUrl", "title": "View Ticket", "url": "https://yourcompany.quickbase.com/nav/app/{{appId}}/action/record?rid=@{triggerBody()?['recordId']}" }
+                        ]
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+
+          },
+          "else": {
+            "actions": {
+
+              "Assign_to_Team_Queue": {
+                "type": "Http",
+                "inputs": {
+                  "method": "POST",
+                  "uri": "https://api.quickbase.com/v1/records",
+                  "headers": {
+                    "QB-Realm-Hostname": "@parameters('QBRealmHostname')",
+                    "Authorization": "QB-USER-TOKEN @{parameters('QBUserToken')}",
+                    "Content-Type": "application/json"
+                  },
+                  "body": {
+                    "to": "@parameters('QBTicketsTableId')",
+                    "data": [
+                      {
+                        "3":  { "value": "@triggerBody()?['recordId']" },
+                        "11": { "value": "New" },
+                        "15": { "value": "@triggerBody()?['routingTeam']" },
+                        "33": { "value": "Queued — no available agents in @{triggerBody()?['routingTeam']} at time of routing." }
+                      }
+                    ]
+                  }
+                }
+              },
+
+              "Alert_Team_Lead_Capacity": {
+                "type": "ApiConnection",
+                "runAfter": { "Assign_to_Team_Queue": ["Succeeded"] },
+                "inputs": {
+                  "host": { "connection": { "name": "@parameters('$connections')['office365']['connectionId']" } },
+                  "method": "post",
+                  "path": "/v2/Mail/Send",
+                  "body": {
+                    "To": "teamlead-@{toLower(replace(triggerBody()?['routingTeam'], ' ', ''))}@yourcompany.com",
+                    "Subject": "Capacity Alert: No agents available for @{triggerBody()?['ticketId']}",
+                    "Body": "<p>A new <b>@{triggerBody()?['priority']}</b> ticket (@{triggerBody()?['ticketId']}) could not be auto-assigned because all @{triggerBody()?['routingTeam']} agents are at capacity.</p><p>Manual assignment required.</p>",
+                    "IsHtml": true
+                  }
+                }
+              }
+
+            }
+          }
+        }
+
+      }
+    }
+  }
+}

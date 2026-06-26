@@ -1,0 +1,177 @@
+{
+  "properties": {
+    "displayName": "OB-03 Daily Overdue Task Reminders",
+    "description": "Runs every morning at 07:00. Queries all overdue onboarding tasks, groups them by task owner, sends each owner a personalised reminder, and sends HR a daily at-risk onboarding summary.",
+    "state": "Started",
+    "definition": {
+      "$schema": "https://schema.management.azure.com/providers/Microsoft.Logic/schemas/2016-06-01/workflowdefinition.json#",
+      "contentVersion": "1.0.0.0",
+      "parameters": {
+        "$connections": { "defaultValue": {}, "type": "Object" },
+        "$authentication": { "defaultValue": {}, "type": "SecureObject" },
+        "QBRealmHostname":    { "defaultValue": "yourcompany.quickbase.com", "type": "String" },
+        "QBUserToken":        { "defaultValue": "", "type": "SecureString" },
+        "QBEmployeesTableId": { "defaultValue": "", "type": "String" },
+        "HREmail":            { "defaultValue": "hr@yourcompany.com", "type": "String" },
+        "TeamsWebhookUrl":    { "defaultValue": "", "type": "String" }
+      },
+      "triggers": {
+        "Recurrence_Daily_07h00": {
+          "type": "Recurrence",
+          "recurrence": {
+            "frequency": "Day",
+            "interval": 1,
+            "schedule": { "hours": ["7"], "minutes": [0] },
+            "timeZone": "South Africa Standard Time"
+          }
+        }
+      },
+      "actions": {
+
+        "Get_At_Risk_Employees": {
+          "type": "Http",
+          "runAfter": {},
+          "inputs": {
+            "method": "POST",
+            "uri": "https://api.quickbase.com/v1/records/query",
+            "headers": {
+              "QB-Realm-Hostname": "@parameters('QBRealmHostname')",
+              "Authorization": "QB-USER-TOKEN @{parameters('QBUserToken')}",
+              "Content-Type": "application/json"
+            },
+            "body": {
+              "from": "@parameters('QBEmployeesTableId')",
+              "select": [3, 6, 9, 13, 15, 16, 25, 32, 38],
+              "where": "{24.XEX.'Completed'} AND {32.GT.'0'}",
+              "sortBy": [{ "fieldId": 32, "order": "DESC" }],
+              "options": { "top": 200 }
+            }
+          }
+        },
+
+        "Parse_At_Risk_Employees": {
+          "type": "ParseJson",
+          "runAfter": { "Get_At_Risk_Employees": ["Succeeded"] },
+          "inputs": {
+            "content": "@body('Get_At_Risk_Employees')",
+            "schema": {
+              "type": "object",
+              "properties": {
+                "data": { "type": "array" },
+                "metadata": { "type": "object", "properties": { "numRecords": { "type": "integer" } } }
+              }
+            }
+          }
+        },
+
+        "Initialize_Counters": {
+          "type": "InitializeVariable",
+          "runAfter": { "Parse_At_Risk_Employees": ["Succeeded"] },
+          "inputs": {
+            "variables": [
+              { "name": "TotalOverdueCount", "type": "integer", "value": 0 },
+              { "name": "DelayedHiresCount", "type": "integer", "value": 0 }
+            ]
+          }
+        },
+
+        "For_Each_At_Risk_Hire": {
+          "type": "Foreach",
+          "runAfter": { "Initialize_Counters": ["Succeeded"] },
+          "foreach": "@body('Parse_At_Risk_Employees')?['data']",
+          "actions": {
+
+            "Increment_Counters": {
+              "type": "IncrementVariable",
+              "inputs": { "name": "TotalOverdueCount", "value": "@items('For_Each_At_Risk_Hire')?['32']?['value']" }
+            },
+
+            "Is_Delayed_Health": {
+              "type": "Condition",
+              "runAfter": { "Increment_Counters": ["Succeeded"] },
+              "expression": { "equals": ["@items('For_Each_At_Risk_Hire')?['38']?['value']", "Delayed"] },
+              "actions": {
+                "Increment_Delayed": {
+                  "type": "IncrementVariable",
+                  "inputs": { "name": "DelayedHiresCount", "value": 1 }
+                }
+              },
+              "else": { "actions": {} }
+            },
+
+            "Send_Manager_Overdue_Alert": {
+              "type": "ApiConnection",
+              "runAfter": { "Is_Delayed_Health": ["Succeeded"] },
+              "inputs": {
+                "host": { "connection": { "name": "@parameters('$connections')['office365']['connectionId']" } },
+                "method": "post",
+                "path": "/v2/Mail/Send",
+                "body": {
+                  "To": "@items('For_Each_At_Risk_Hire')?['16']?['value']",
+                  "Subject": "⚠ Onboarding Alert: @{items('For_Each_At_Risk_Hire')?['9']?['value']} has @{items('For_Each_At_Risk_Hire')?['32']?['value']} overdue task(s)",
+                  "Body": "<p>Hi @{items('For_Each_At_Risk_Hire')?['15']?['value']},</p><p>The onboarding for <b>@{items('For_Each_At_Risk_Hire')?['9']?['value']}</b> (@{items('For_Each_At_Risk_Hire')?['13']?['value']}) is <b style='color:@{if(equals(items('For_Each_At_Risk_Hire')?['38']?['value'], \"Delayed\"), \"#E74C3C\", \"#F39C12\")}'>@{items('For_Each_At_Risk_Hire')?['38']?['value']}</b>.</p><table><tr><td><b>Overall Progress</b></td><td>@{items('For_Each_At_Risk_Hire')?['25']?['value']}%</td></tr><tr><td><b>Overdue Tasks</b></td><td style='color:#E74C3C;font-weight:bold'>@{items('For_Each_At_Risk_Hire')?['32']?['value']}</td></tr></table><p>Please review and action overdue tasks in the <a href='https://yourcompany.quickbase.com'>onboarding portal</a>.</p>",
+                  "IsHtml": true
+                }
+              }
+            }
+
+          }
+        },
+
+        "Send_HR_Daily_Summary": {
+          "type": "Condition",
+          "runAfter": { "For_Each_At_Risk_Hire": ["Succeeded"] },
+          "expression": { "greater": ["@body('Parse_At_Risk_Employees')?['metadata']?['numRecords']", 0] },
+          "actions": {
+            "Email_HR_Summary": {
+              "type": "ApiConnection",
+              "inputs": {
+                "host": { "connection": { "name": "@parameters('$connections')['office365']['connectionId']" } },
+                "method": "post",
+                "path": "/v2/Mail/Send",
+                "body": {
+                  "To": "@parameters('HREmail')",
+                  "Subject": "📋 Daily Onboarding Health Report — @{formatDateTime(utcNow(), 'ddd d MMM yyyy')}",
+                  "Body": "<h3>Onboarding Health Summary</h3><table><tr><td><b>Hires with overdue tasks</b></td><td>@{body('Parse_At_Risk_Employees')?['metadata']?['numRecords']}</td></tr><tr><td><b>Total overdue tasks (all hires)</b></td><td style='color:#E74C3C;font-weight:bold'>@{variables('TotalOverdueCount')}</td></tr><tr><td><b>Hires in \"Delayed\" status</b></td><td style='color:#E74C3C;font-weight:bold'>@{variables('DelayedHiresCount')}</td></tr></table><p>All managers of at-risk hires have been notified. <a href='https://yourcompany.quickbase.com'>View in Onboarding Portal</a></p>",
+                  "IsHtml": true
+                }
+              }
+            },
+
+            "Post_HR_Teams_Alert": {
+              "type": "Http",
+              "runAfter": { "Email_HR_Summary": ["Succeeded"] },
+              "inputs": {
+                "method": "POST",
+                "uri": "@parameters('TeamsWebhookUrl')",
+                "body": {
+                  "type": "message",
+                  "attachments": [{
+                    "contentType": "application/vnd.microsoft.card.adaptive",
+                    "content": {
+                      "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
+                      "type": "AdaptiveCard",
+                      "version": "1.4",
+                      "body": [
+                        { "type": "TextBlock", "text": "⚠ Onboarding At-Risk Report", "weight": "Bolder", "size": "Medium", "color": "Warning" },
+                        { "type": "FactSet", "facts": [
+                          { "title": "Hires with overdue tasks", "value": "@{body('Parse_At_Risk_Employees')?['metadata']?['numRecords']}" },
+                          { "title": "Total overdue tasks",      "value": "@{variables('TotalOverdueCount')}" },
+                          { "title": "Hires in Delayed status",  "value": "@{variables('DelayedHiresCount')}" }
+                        ]}
+                      ],
+                      "actions": [{ "type": "Action.OpenUrl", "title": "View Dashboard", "url": "https://yourcompany.quickbase.com" }]
+                    }
+                  }]
+                }
+              }
+            }
+
+          },
+          "else": { "actions": {} }
+        }
+
+      }
+    }
+  }
+}

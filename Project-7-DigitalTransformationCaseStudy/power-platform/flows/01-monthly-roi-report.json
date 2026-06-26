@@ -1,0 +1,116 @@
+﻿{
+  "properties": {
+    "displayName": "DT-01 Monthly ROI Report",
+    "description": "Runs on the 1st of each month. Calls the Python ROI calculator, generates the monthly transformation impact HTML report, and distributes it to the executive team.",
+    "state": "Started",
+    "definition": {
+      "$schema": "https://schema.management.azure.com/providers/Microsoft.Logic/schemas/2016-06-01/workflowdefinition.json#",
+      "contentVersion": "1.0.0.0",
+      "parameters": {
+        "$connections":       { "defaultValue": {}, "type": "Object" },
+        "$authentication":    { "defaultValue": {}, "type": "SecureObject" },
+        "ROISnapshotUrl":     { "defaultValue": "", "type": "String" },
+        "ExecDistributionList": { "defaultValue": "executives@yourcompany.com", "type": "String" },
+        "TeamsWebhookUrl":    { "defaultValue": "", "type": "String" }
+      },
+      "triggers": {
+        "Monthly_1st_0700": {
+          "type": "Recurrence",
+          "recurrence": {
+            "frequency": "Month",
+            "interval": 1,
+            "schedule": { "monthDays": [1], "hours": ["7"], "minutes": [0] },
+            "timeZone": "South Africa Standard Time"
+          }
+        }
+      },
+      "actions": {
+
+        "Generate_ROI_Snapshot": {
+          "type": "Http",
+          "runAfter": {},
+          "inputs": {
+            "method": "POST",
+            "uri": "@parameters('ROISnapshotUrl')",
+            "headers": { "Content-Type": "application/json" },
+            "body": { "trigger": "monthly_report", "period": "@formatDateTime(utcNow(), 'yyyy-MM')" }
+          }
+        },
+
+        "Parse_ROI_Response": {
+          "type": "ParseJson",
+          "runAfter": { "Generate_ROI_Snapshot": ["Succeeded"] },
+          "inputs": {
+            "content": "@body('Generate_ROI_Snapshot')",
+            "schema": {
+              "type": "object",
+              "properties": {
+                "reportHtml":            { "type": "string" },
+                "reportSubject":         { "type": "string" },
+                "totalBenefitsYTD":      { "type": "number" },
+                "totalInvestment":       { "type": "number" },
+                "roiPct":                { "type": "number" },
+                "paybackMonths":         { "type": "number" },
+                "npv3Year":              { "type": "number" },
+                "benefitRealizationPct": { "type": "number" },
+                "milestonesCompleted":   { "type": "integer" },
+                "milestonesTotal":       { "type": "integer" },
+                "alertCount":            { "type": "integer" }
+              }
+            }
+          }
+        },
+
+        "Send_Executive_ROI_Report": {
+          "type": "ApiConnection",
+          "runAfter": { "Parse_ROI_Response": ["Succeeded"] },
+          "inputs": {
+            "host": { "connection": { "name": "@parameters('$connections')['office365']['connectionId']" } },
+            "method": "post",
+            "path": "/v2/Mail/Send",
+            "body": {
+              "To": "@parameters('ExecDistributionList')",
+              "Subject": "@{body('Parse_ROI_Response')?['reportSubject']}",
+              "Body": "@{body('Parse_ROI_Response')?['reportHtml']}",
+              "IsHtml": true,
+              "Importance": "@{if(less(body('Parse_ROI_Response')?['benefitRealizationPct'], 85), 'High', 'Normal')}"
+            }
+          }
+        },
+
+        "Post_ROI_Summary_to_Teams": {
+          "type": "Http",
+          "runAfter": { "Send_Executive_ROI_Report": ["Succeeded"] },
+          "inputs": {
+            "method": "POST",
+            "uri": "@parameters('TeamsWebhookUrl')",
+            "body": {
+              "type": "message",
+              "attachments": [{
+                "contentType": "application/vnd.microsoft.card.adaptive",
+                "content": {
+                  "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
+                  "type": "AdaptiveCard",
+                  "version": "1.4",
+                  "body": [
+                    { "type": "TextBlock", "text": "📊 Monthly Transformation ROI Report", "weight": "Bolder", "size": "Large" },
+                    { "type": "TextBlock", "text": "@{formatDateTime(utcNow(), 'MMMM yyyy')}", "isSubtle": true },
+                    { "type": "FactSet", "facts": [
+                      { "title": "💰 Benefits YTD",         "value": "R@{body('Parse_ROI_Response')?['totalBenefitsYTD']}" },
+                      { "title": "📈 ROI",                  "value": "@{body('Parse_ROI_Response')?['roiPct']}%" },
+                      { "title": "⏱ Payback Period",        "value": "@{body('Parse_ROI_Response')?['paybackMonths']} months" },
+                      { "title": "🎯 Benefit Realization",  "value": "@{body('Parse_ROI_Response')?['benefitRealizationPct']}%" },
+                      { "title": "✅ Milestones",            "value": "@{body('Parse_ROI_Response')?['milestonesCompleted']}/@{body('Parse_ROI_Response')?['milestonesTotal']}" }
+                    ]}
+                  ],
+                  "actions": [{ "type": "Action.OpenUrl", "title": "View Full Dashboard", "url": "https://app.powerbi.com/groups/{{workspaceId}}/dashboards/{{dashboardId}}" }]
+                }
+              }]
+            }
+          }
+        }
+
+      }
+    }
+  }
+}

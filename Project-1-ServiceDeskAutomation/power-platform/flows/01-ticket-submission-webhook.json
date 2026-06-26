@@ -1,0 +1,198 @@
+{
+  "properties": {
+    "displayName": "SD-01 Ticket Intake via Webhook",
+    "description": "Receives ticket submissions from the Power Apps portal and external systems, validates the payload, creates the Quickbase record, and sends a confirmation to the submitter.",
+    "state": "Started",
+    "definition": {
+      "$schema": "https://schema.management.azure.com/providers/Microsoft.Logic/schemas/2016-06-01/workflowdefinition.json#",
+      "contentVersion": "1.0.0.0",
+      "parameters": {
+        "$connections": { "defaultValue": {}, "type": "Object" },
+        "$authentication": { "defaultValue": {}, "type": "SecureObject" },
+        "QBRealmHostname": { "defaultValue": "yourcompany.quickbase.com", "type": "String" },
+        "QBUserToken": { "defaultValue": "", "type": "SecureString" },
+        "QBAppId": { "defaultValue": "", "type": "String" },
+        "QBTicketsTableId": { "defaultValue": "", "type": "String" }
+      },
+      "triggers": {
+        "When_HTTP_Request_Received": {
+          "type": "Request",
+          "kind": "Http",
+          "inputs": {
+            "schema": {
+              "type": "object",
+              "required": ["title", "category", "priority", "submitterName", "submitterEmail", "description"],
+              "properties": {
+                "title":          { "type": "string" },
+                "description":    { "type": "string" },
+                "category":       { "type": "string" },
+                "priority":       { "type": "string" },
+                "submitterName":  { "type": "string" },
+                "submitterEmail": { "type": "string" },
+                "tags":           { "type": "string" },
+                "attachmentUrl":  { "type": "string" }
+              }
+            }
+          }
+        }
+      },
+      "actions": {
+
+        "Validate_Priority": {
+          "type": "Condition",
+          "runAfter": {},
+          "expression": {
+            "and": [
+              {
+                "or": [
+                  { "equals": ["@triggerBody()?['priority']", "P1-Critical"] },
+                  { "equals": ["@triggerBody()?['priority']", "P2-High"] },
+                  { "equals": ["@triggerBody()?['priority']", "P3-Medium"] },
+                  { "equals": ["@triggerBody()?['priority']", "P4-Low"] }
+                ]
+              }
+            ]
+          },
+          "actions": {},
+          "else": {
+            "actions": {
+              "Return_400_Bad_Request": {
+                "type": "Response",
+                "inputs": {
+                  "statusCode": 400,
+                  "body": {
+                    "error": "Invalid priority. Must be P1-Critical, P2-High, P3-Medium, or P4-Low.",
+                    "received": "@triggerBody()?['priority']"
+                  }
+                }
+              }
+            }
+          }
+        },
+
+        "Compute_Due_Date": {
+          "type": "Compose",
+          "runAfter": { "Validate_Priority": ["Succeeded"] },
+          "inputs": "@addHours(utcNow(), if(equals(triggerBody()?['priority'], 'P1-Critical'), 4, if(equals(triggerBody()?['priority'], 'P2-High'), 8, if(equals(triggerBody()?['priority'], 'P3-Medium'), 24, 72))))"
+        },
+
+        "Create_QB_Ticket_Record": {
+          "type": "Http",
+          "runAfter": { "Compute_Due_Date": ["Succeeded"] },
+          "inputs": {
+            "method": "POST",
+            "uri": "https://api.quickbase.com/v1/records",
+            "headers": {
+              "QB-Realm-Hostname": "@parameters('QBRealmHostname')",
+              "Authorization": "QB-USER-TOKEN @{parameters('QBUserToken')}",
+              "Content-Type": "application/json"
+            },
+            "body": {
+              "to": "@parameters('QBTicketsTableId')",
+              "data": [
+                {
+                  "7":  { "value": "@triggerBody()?['title']" },
+                  "8":  { "value": "@triggerBody()?['description']" },
+                  "9":  { "value": "@triggerBody()?['category']" },
+                  "10": { "value": "@triggerBody()?['priority']" },
+                  "11": { "value": "New" },
+                  "12": { "value": "@triggerBody()?['submitterName']" },
+                  "13": { "value": "@triggerBody()?['submitterEmail']" },
+                  "31": { "value": "@triggerBody()?['tags']" }
+                }
+              ],
+              "fieldsToReturn": [3, 6, 18]
+            }
+          }
+        },
+
+        "Parse_QB_Response": {
+          "type": "ParseJson",
+          "runAfter": { "Create_QB_Ticket_Record": ["Succeeded"] },
+          "inputs": {
+            "content": "@body('Create_QB_Ticket_Record')",
+            "schema": {
+              "type": "object",
+              "properties": {
+                "data": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "3":  { "type": "object", "properties": { "value": { "type": "integer" } } },
+                      "6":  { "type": "object", "properties": { "value": { "type": "string" } } },
+                      "18": { "type": "object", "properties": { "value": { "type": "string" } } }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+
+        "Send_Confirmation_Email": {
+          "type": "ApiConnection",
+          "runAfter": { "Parse_QB_Response": ["Succeeded"] },
+          "inputs": {
+            "host": { "connection": { "name": "@parameters('$connections')['office365']['connectionId']" } },
+            "method": "post",
+            "path": "/v2/Mail/Send",
+            "body": {
+              "To": "@triggerBody()?['submitterEmail']",
+              "Subject": "Ticket Received: @{body('Parse_QB_Response')?['data'][0]['6']['value']} – @{triggerBody()?['title']}",
+              "Body": "<p>Hi @{triggerBody()?['submitterName']},</p><p>Your service desk request has been received.</p><table><tr><td><b>Reference:</b></td><td>@{body('Parse_QB_Response')?['data'][0]['6']['value']}</td></tr><tr><td><b>Priority:</b></td><td>@{triggerBody()?['priority']}</td></tr><tr><td><b>Category:</b></td><td>@{triggerBody()?['category']}</td></tr><tr><td><b>SLA Due:</b></td><td>@{outputs('Compute_Due_Date')}</td></tr></table><p>You will receive updates as your ticket progresses.</p><p>Service Desk Team</p>",
+              "IsHtml": true
+            }
+          }
+        },
+
+        "Return_Success_Response": {
+          "type": "Response",
+          "runAfter": { "Send_Confirmation_Email": ["Succeeded"] },
+          "inputs": {
+            "statusCode": 201,
+            "body": {
+              "ticketId": "@body('Parse_QB_Response')?['data'][0]['6']['value']",
+              "recordId": "@body('Parse_QB_Response')?['data'][0]['3']['value']",
+              "dueDate": "@outputs('Compute_Due_Date')",
+              "message": "Ticket created successfully."
+            }
+          }
+        },
+
+        "Handle_Error": {
+          "type": "Scope",
+          "runAfter": {
+            "Create_QB_Ticket_Record": ["Failed", "TimedOut"],
+            "Send_Confirmation_Email": ["Failed"]
+          },
+          "actions": {
+            "Send_Error_Alert_Email": {
+              "type": "ApiConnection",
+              "inputs": {
+                "host": { "connection": { "name": "@parameters('$connections')['office365']['connectionId']" } },
+                "method": "post",
+                "path": "/v2/Mail/Send",
+                "body": {
+                  "To": "servicedesk-admin@yourcompany.com",
+                  "Subject": "Flow Error: Ticket Intake Failed",
+                  "Body": "<p>The ticket intake flow encountered an error.</p><p>Submitter: @{triggerBody()?['submitterEmail']}</p><p>Error: @{result('Create_QB_Ticket_Record')}</p>",
+                  "IsHtml": true
+                }
+              }
+            },
+            "Return_500_Error": {
+              "type": "Response",
+              "runAfter": { "Send_Error_Alert_Email": ["Succeeded", "Failed"] },
+              "inputs": {
+                "statusCode": 500,
+                "body": { "error": "An internal error occurred. The service desk team has been notified." }
+              }
+            }
+          }
+        }
+
+      }
+    }
+  }
+}

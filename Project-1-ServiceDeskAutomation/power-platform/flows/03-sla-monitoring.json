@@ -1,0 +1,219 @@
+{
+  "properties": {
+    "displayName": "SD-03 SLA Monitoring (Scheduled)",
+    "description": "Runs every 15 minutes. Queries all open tickets from Quickbase, evaluates SLA status for each, and triggers escalation actions for At Risk and Breached tickets.",
+    "state": "Started",
+    "definition": {
+      "$schema": "https://schema.management.azure.com/providers/Microsoft.Logic/schemas/2016-06-01/workflowdefinition.json#",
+      "contentVersion": "1.0.0.0",
+      "parameters": {
+        "$connections": { "defaultValue": {}, "type": "Object" },
+        "$authentication": { "defaultValue": {}, "type": "SecureObject" },
+        "QBRealmHostname": { "defaultValue": "yourcompany.quickbase.com", "type": "String" },
+        "QBUserToken": { "defaultValue": "", "type": "SecureString" },
+        "QBTicketsTableId": { "defaultValue": "", "type": "String" },
+        "EscalationFlowUrl": { "defaultValue": "", "type": "String" }
+      },
+      "triggers": {
+        "Recurrence_Every_15_Minutes": {
+          "type": "Recurrence",
+          "recurrence": {
+            "frequency": "Minute",
+            "interval": 15,
+            "timeZone": "South Africa Standard Time"
+          }
+        }
+      },
+      "actions": {
+
+        "Get_Open_Tickets": {
+          "type": "Http",
+          "runAfter": {},
+          "inputs": {
+            "method": "POST",
+            "uri": "https://api.quickbase.com/v1/records/query",
+            "headers": {
+              "QB-Realm-Hostname": "@parameters('QBRealmHostname')",
+              "Authorization": "QB-USER-TOKEN @{parameters('QBUserToken')}",
+              "Content-Type": "application/json"
+            },
+            "body": {
+              "from": "@parameters('QBTicketsTableId')",
+              "select": [3, 6, 7, 10, 11, 12, 13, 14, 15, 16, 18, 22, 23, 29, 34],
+              "where": "{11.XEX.'Resolved'} AND {11.XEX.'Closed'}",
+              "sortBy": [
+                { "fieldId": 10, "order": "ASC" },
+                { "fieldId": 23, "order": "ASC" }
+              ]
+            }
+          }
+        },
+
+        "Parse_Open_Tickets": {
+          "type": "ParseJson",
+          "runAfter": { "Get_Open_Tickets": ["Succeeded"] },
+          "inputs": {
+            "content": "@body('Get_Open_Tickets')",
+            "schema": {
+              "type": "object",
+              "properties": {
+                "data": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "3":  { "type": "object", "properties": { "value": { "type": "integer" } } },
+                      "6":  { "type": "object", "properties": { "value": { "type": "string" } } },
+                      "7":  { "type": "object", "properties": { "value": { "type": "string" } } },
+                      "10": { "type": "object", "properties": { "value": { "type": "string" } } },
+                      "11": { "type": "object", "properties": { "value": { "type": "string" } } },
+                      "12": { "type": "object", "properties": { "value": { "type": "string" } } },
+                      "13": { "type": "object", "properties": { "value": { "type": "string" } } },
+                      "14": { "type": "object", "properties": { "value": { "type": "string" } } },
+                      "15": { "type": "object", "properties": { "value": { "type": "string" } } },
+                      "16": { "type": "object", "properties": { "value": { "type": "string" } } },
+                      "18": { "type": "object", "properties": { "value": { "type": "string" } } },
+                      "22": { "type": "object", "properties": { "value": { "type": "string" } } },
+                      "23": { "type": "object", "properties": { "value": { "type": "number" } } },
+                      "29": { "type": "object", "properties": { "value": { "type": "boolean" } } },
+                      "34": { "type": "object", "properties": { "value": { "type": "string" } } }
+                    }
+                  }
+                },
+                "metadata": { "type": "object" }
+              }
+            }
+          }
+        },
+
+        "Initialize_Breach_Count": {
+          "type": "InitializeVariable",
+          "runAfter": { "Parse_Open_Tickets": ["Succeeded"] },
+          "inputs": {
+            "variables": [
+              { "name": "BreachCount", "type": "integer", "value": 0 },
+              { "name": "AtRiskCount", "type": "integer", "value": 0 },
+              { "name": "P1BreachCount", "type": "integer", "value": 0 }
+            ]
+          }
+        },
+
+        "For_Each_Ticket": {
+          "type": "Foreach",
+          "runAfter": { "Initialize_Breach_Count": ["Succeeded"] },
+          "foreach": "@body('Parse_Open_Tickets')?['data']",
+          "actions": {
+
+            "Check_SLA_Status": {
+              "type": "Switch",
+              "expression": "@items('For_Each_Ticket')?['22']?['value']",
+              "cases": {
+
+                "Breached": {
+                  "case": "Breached",
+                  "actions": {
+                    "Increment_Breach_Count": {
+                      "type": "IncrementVariable",
+                      "inputs": { "name": "BreachCount", "value": 1 }
+                    },
+                    "Check_P1_Breach": {
+                      "type": "Condition",
+                      "runAfter": { "Increment_Breach_Count": ["Succeeded"] },
+                      "expression": { "equals": ["@items('For_Each_Ticket')?['10']?['value']", "P1-Critical"] },
+                      "actions": {
+                        "Increment_P1_Breach": {
+                          "type": "IncrementVariable",
+                          "inputs": { "name": "P1BreachCount", "value": 1 }
+                        }
+                      },
+                      "else": { "actions": {} }
+                    },
+                    "Trigger_Escalation_Flow": {
+                      "type": "Http",
+                      "runAfter": { "Check_P1_Breach": ["Succeeded"] },
+                      "inputs": {
+                        "method": "POST",
+                        "uri": "@parameters('EscalationFlowUrl')",
+                        "body": {
+                          "recordId":      "@items('For_Each_Ticket')?['3']?['value']",
+                          "ticketId":      "@items('For_Each_Ticket')?['6']?['value']",
+                          "title":         "@items('For_Each_Ticket')?['7']?['value']",
+                          "priority":      "@items('For_Each_Ticket')?['10']?['value']",
+                          "status":        "@items('For_Each_Ticket')?['11']?['value']",
+                          "submitterName": "@items('For_Each_Ticket')?['12']?['value']",
+                          "submitterEmail":"@items('For_Each_Ticket')?['13']?['value']",
+                          "agentEmail":    "@items('For_Each_Ticket')?['14']?['value']",
+                          "team":          "@items('For_Each_Ticket')?['15']?['value']",
+                          "dueDate":       "@items('For_Each_Ticket')?['18']?['value']",
+                          "slaStatus":     "Breached",
+                          "hoursOverdue":  "@mul(items('For_Each_Ticket')?['23']?['value'], -1)"
+                        }
+                      }
+                    }
+                  }
+                },
+
+                "At_Risk": {
+                  "case": "At Risk",
+                  "actions": {
+                    "Increment_At_Risk_Count": {
+                      "type": "IncrementVariable",
+                      "inputs": { "name": "AtRiskCount", "value": 1 }
+                    },
+                    "Send_At_Risk_Warning": {
+                      "type": "ApiConnection",
+                      "runAfter": { "Increment_At_Risk_Count": ["Succeeded"] },
+                      "inputs": {
+                        "host": { "connection": { "name": "@parameters('$connections')['office365']['connectionId']" } },
+                        "method": "post",
+                        "path": "/v2/Mail/Send",
+                        "body": {
+                          "To": "@items('For_Each_Ticket')?['14']?['value']",
+                          "Subject": "⚠ SLA At Risk: @{items('For_Each_Ticket')?['6']?['value']} [@{items('For_Each_Ticket')?['10']?['value']}]",
+                          "Body": "<p><b>Warning: This ticket is approaching its SLA deadline.</b></p><table><tr><td><b>Ticket</b></td><td>@{items('For_Each_Ticket')?['6']?['value']}</td></tr><tr><td><b>Title</b></td><td>@{items('For_Each_Ticket')?['7']?['value']}</td></tr><tr><td><b>Priority</b></td><td>@{items('For_Each_Ticket')?['10']?['value']}</td></tr><tr><td><b>SLA Due</b></td><td>@{items('For_Each_Ticket')?['18']?['value']}</td></tr><tr><td><b>Hours Remaining</b></td><td>@{items('For_Each_Ticket')?['23']?['value']}</td></tr></table>",
+                          "IsHtml": true
+                        }
+                      }
+                    }
+                  }
+                }
+
+              },
+              "default": { "actions": {} }
+            }
+
+          }
+        },
+
+        "Send_Manager_Summary": {
+          "type": "Condition",
+          "runAfter": { "For_Each_Ticket": ["Succeeded"] },
+          "expression": {
+            "or": [
+              { "greater": ["@variables('BreachCount')", 0] },
+              { "greater": ["@variables('P1BreachCount')", 0] }
+            ]
+          },
+          "actions": {
+            "Email_Manager_Summary": {
+              "type": "ApiConnection",
+              "inputs": {
+                "host": { "connection": { "name": "@parameters('$connections')['office365']['connectionId']" } },
+                "method": "post",
+                "path": "/v2/Mail/Send",
+                "body": {
+                  "To": "servicedesk-manager@yourcompany.com",
+                  "Subject": "SLA Alert Summary — @{formatDateTime(utcNow(), 'yyyy-MM-dd HH:mm')} SAST",
+                  "Body": "<h3>SLA Monitoring Report</h3><table><tr><td><b>Total Open Tickets</b></td><td>@{body('Parse_Open_Tickets')?['metadata']?['numRecords']}</td></tr><tr><td><b>At Risk</b></td><td>@{variables('AtRiskCount')}</td></tr><tr><td><b>Breached</b></td><td style='color:red'>@{variables('BreachCount')}</td></tr><tr><td><b>P1 Breaches</b></td><td style='color:red;font-weight:bold'>@{variables('P1BreachCount')}</td></tr></table>",
+                  "IsHtml": true
+                }
+              }
+            }
+          },
+          "else": { "actions": {} }
+        }
+
+      }
+    }
+  }
+}

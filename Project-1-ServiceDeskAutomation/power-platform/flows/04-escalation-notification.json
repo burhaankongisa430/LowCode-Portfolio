@@ -1,0 +1,215 @@
+{
+  "properties": {
+    "displayName": "SD-04 Escalation & Notifications",
+    "description": "Called by the SLA monitoring flow when a ticket is Breached or At Risk. Routes the escalation to the correct level (L1 Team Lead or L2 Manager), posts an Adaptive Card in Teams, and logs the escalation in Quickbase.",
+    "state": "Started",
+    "definition": {
+      "$schema": "https://schema.management.azure.com/providers/Microsoft.Logic/schemas/2016-06-01/workflowdefinition.json#",
+      "contentVersion": "1.0.0.0",
+      "parameters": {
+        "$connections": { "defaultValue": {}, "type": "Object" },
+        "$authentication": { "defaultValue": {}, "type": "SecureObject" },
+        "QBRealmHostname": { "defaultValue": "yourcompany.quickbase.com", "type": "String" },
+        "QBUserToken": { "defaultValue": "", "type": "SecureString" },
+        "QBTicketsTableId": { "defaultValue": "", "type": "String" },
+        "QBAuditTableId": { "defaultValue": "", "type": "String" },
+        "TeamsEscalationChannelWebhook": { "defaultValue": "", "type": "String" },
+        "ManagerEmail": { "defaultValue": "sd-manager@yourcompany.com", "type": "String" }
+      },
+      "triggers": {
+        "When_HTTP_Request_Received": {
+          "type": "Request",
+          "kind": "Http",
+          "inputs": {
+            "schema": {
+              "type": "object",
+              "required": ["recordId", "ticketId", "priority", "slaStatus"],
+              "properties": {
+                "recordId":      { "type": "integer" },
+                "ticketId":      { "type": "string" },
+                "title":         { "type": "string" },
+                "priority":      { "type": "string" },
+                "status":        { "type": "string" },
+                "submitterName": { "type": "string" },
+                "submitterEmail":{ "type": "string" },
+                "agentEmail":    { "type": "string" },
+                "team":          { "type": "string" },
+                "dueDate":       { "type": "string" },
+                "slaStatus":     { "type": "string" },
+                "hoursOverdue":  { "type": "number" }
+              }
+            }
+          }
+        }
+      },
+      "actions": {
+
+        "Determine_Escalation_Level": {
+          "type": "Switch",
+          "runAfter": {},
+          "expression": "@triggerBody()?['priority']",
+          "cases": {
+
+            "P1_Critical": {
+              "case": "P1-Critical",
+              "actions": {
+                "Set_Escalation_L2_for_P1": {
+                  "type": "Compose",
+                  "inputs": {
+                    "level": "L2-Manager",
+                    "urgencyLabel": "CRITICAL BREACH",
+                    "color": "attention"
+                  }
+                }
+              }
+            },
+
+            "P2_High": {
+              "case": "P2-High",
+              "actions": {
+                "Set_Escalation_Level_P2": {
+                  "type": "Compose",
+                  "inputs": {
+                    "level": "@if(equals(triggerBody()?['slaStatus'], 'Breached'), 'L2-Manager', 'L1-TeamLead')",
+                    "urgencyLabel": "@if(equals(triggerBody()?['slaStatus'], 'Breached'), 'SLA BREACHED', 'SLA AT RISK')",
+                    "color": "@if(equals(triggerBody()?['slaStatus'], 'Breached'), 'attention', 'warning')"
+                  }
+                }
+              }
+            }
+
+          },
+          "default": {
+            "actions": {
+              "Set_Default_Escalation": {
+                "type": "Compose",
+                "inputs": {
+                  "level": "@if(equals(triggerBody()?['slaStatus'], 'Breached'), 'L1-TeamLead', 'Agent')",
+                  "urgencyLabel": "@if(equals(triggerBody()?['slaStatus'], 'Breached'), 'SLA BREACHED', 'SLA AT RISK')",
+                  "color": "@if(equals(triggerBody()?['slaStatus'], 'Breached'), 'attention', 'warning')"
+                }
+              }
+            }
+          }
+        },
+
+        "Post_Teams_Escalation_Card": {
+          "type": "Http",
+          "runAfter": { "Determine_Escalation_Level": ["Succeeded"] },
+          "inputs": {
+            "method": "POST",
+            "uri": "@parameters('TeamsEscalationChannelWebhook')",
+            "headers": { "Content-Type": "application/json" },
+            "body": {
+              "type": "message",
+              "attachments": [
+                {
+                  "contentType": "application/vnd.microsoft.card.adaptive",
+                  "content": {
+                    "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
+                    "type": "AdaptiveCard",
+                    "version": "1.4",
+                    "body": [
+                      {
+                        "type": "Container",
+                        "style": "attention",
+                        "items": [
+                          {
+                            "type": "TextBlock",
+                            "text": "🚨 SLA ESCALATION",
+                            "weight": "Bolder",
+                            "size": "Large",
+                            "color": "Attention"
+                          },
+                          {
+                            "type": "TextBlock",
+                            "text": "@{triggerBody()?['ticketId']} — @{triggerBody()?['title']}",
+                            "wrap": true,
+                            "weight": "Bolder"
+                          }
+                        ]
+                      },
+                      {
+                        "type": "FactSet",
+                        "facts": [
+                          { "title": "Priority", "value": "@{triggerBody()?['priority']}" },
+                          { "title": "SLA Status", "value": "@{triggerBody()?['slaStatus']}" },
+                          { "title": "Hours Overdue", "value": "@{triggerBody()?['hoursOverdue']}" },
+                          { "title": "Team", "value": "@{triggerBody()?['team']}" },
+                          { "title": "Submitter", "value": "@{triggerBody()?['submitterName']}" },
+                          { "title": "SLA Due", "value": "@{triggerBody()?['dueDate']}" },
+                          { "title": "Current Status", "value": "@{triggerBody()?['status']}" }
+                        ]
+                      }
+                    ],
+                    "actions": [
+                      {
+                        "type": "Action.OpenUrl",
+                        "title": "View & Update Ticket",
+                        "url": "https://yourcompany.quickbase.com/nav/app/{{appId}}/action/record?rid=@{triggerBody()?['recordId']}"
+                      }
+                    ]
+                  }
+                }
+              ]
+            }
+          }
+        },
+
+        "Send_Escalation_Email": {
+          "type": "ApiConnection",
+          "runAfter": { "Post_Teams_Escalation_Card": ["Succeeded"] },
+          "inputs": {
+            "host": { "connection": { "name": "@parameters('$connections')['office365']['connectionId']" } },
+            "method": "post",
+            "path": "/v2/Mail/Send",
+            "body": {
+              "To": "@{triggerBody()?['agentEmail']}",
+              "CC": "@parameters('ManagerEmail')",
+              "Subject": "🚨 SLA BREACH ESCALATION: @{triggerBody()?['ticketId']} [@{triggerBody()?['priority']}]",
+              "Body": "<div style='border-left:4px solid #E74C3C;padding-left:16px'><h2 style='color:#E74C3C'>SLA Breach Escalation</h2><table style='border-collapse:collapse;width:100%'><tr style='background:#f8f8f8'><td style='padding:8px;font-weight:bold'>Ticket ID</td><td style='padding:8px'>@{triggerBody()?['ticketId']}</td></tr><tr><td style='padding:8px;font-weight:bold'>Title</td><td style='padding:8px'>@{triggerBody()?['title']}</td></tr><tr style='background:#f8f8f8'><td style='padding:8px;font-weight:bold'>Priority</td><td style='padding:8px;color:#E74C3C;font-weight:bold'>@{triggerBody()?['priority']}</td></tr><tr><td style='padding:8px;font-weight:bold'>SLA Deadline</td><td style='padding:8px'>@{triggerBody()?['dueDate']}</td></tr><tr style='background:#f8f8f8'><td style='padding:8px;font-weight:bold'>Hours Overdue</td><td style='padding:8px;color:#E74C3C;font-weight:bold'>@{triggerBody()?['hoursOverdue']} hours</td></tr><tr><td style='padding:8px;font-weight:bold'>Submitter</td><td style='padding:8px'>@{triggerBody()?['submitterName']} (@{triggerBody()?['submitterEmail']})</td></tr></table><p><b>Immediate action required. Please update the ticket status and add resolution notes.</b></p></div>",
+              "IsHtml": true
+            }
+          }
+        },
+
+        "Log_Escalation_in_QB": {
+          "type": "Http",
+          "runAfter": { "Send_Escalation_Email": ["Succeeded"] },
+          "inputs": {
+            "method": "POST",
+            "uri": "https://api.quickbase.com/v1/records",
+            "headers": {
+              "QB-Realm-Hostname": "@parameters('QBRealmHostname')",
+              "Authorization": "QB-USER-TOKEN @{parameters('QBUserToken')}",
+              "Content-Type": "application/json"
+            },
+            "body": {
+              "to": "@parameters('QBAuditTableId')",
+              "data": [
+                {
+                  "6":  { "value": "@triggerBody()?['recordId']" },
+                  "7":  { "value": "Escalation" },
+                  "8":  { "value": "@triggerBody()?['status']" },
+                  "9":  { "value": "@concat('SLA ', triggerBody()?['slaStatus'], ' — ', string(triggerBody()?['hoursOverdue']), 'h overdue')" },
+                  "10": { "value": "System – SLA Monitor" },
+                  "11": { "value": "system@yourcompany.com" }
+                }
+              ]
+            }
+          }
+        },
+
+        "Return_Success": {
+          "type": "Response",
+          "runAfter": { "Log_Escalation_in_QB": ["Succeeded", "Failed"] },
+          "inputs": {
+            "statusCode": 200,
+            "body": { "result": "Escalation processed", "ticketId": "@triggerBody()?['ticketId']" }
+          }
+        }
+
+      }
+    }
+  }
+}

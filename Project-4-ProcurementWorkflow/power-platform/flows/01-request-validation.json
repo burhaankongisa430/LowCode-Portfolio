@@ -1,0 +1,216 @@
+﻿{
+  "properties": {
+    "displayName": "PROC-01 Request Validation & First-Level Routing",
+    "description": "Triggered when a purchase request is submitted. Confirms budget availability, validates the vendor status, updates the QB record with warnings, then routes to the Level 1 approver (Line Manager) via the Approvals connector.",
+    "state": "Started",
+    "definition": {
+      "$schema": "https://schema.management.azure.com/providers/Microsoft.Logic/schemas/2016-06-01/workflowdefinition.json#",
+      "contentVersion": "1.0.0.0",
+      "parameters": {
+        "$connections":    { "defaultValue": {}, "type": "Object" },
+        "$authentication": { "defaultValue": {}, "type": "SecureObject" },
+        "QBRealmHostname":    { "defaultValue": "yourcompany.quickbase.com", "type": "String" },
+        "QBUserToken":        { "defaultValue": "", "type": "SecureString" },
+        "QBRequestsTableId":  { "defaultValue": "", "type": "String" },
+        "QBApprovalHistoryId":{ "defaultValue": "", "type": "String" },
+        "BudgetValidatorUrl": { "defaultValue": "", "type": "String" },
+        "ApprovalRoutingUrl": { "defaultValue": "", "type": "String" }
+      },
+      "triggers": {
+        "When_HTTP_Request_Received": {
+          "type": "Request",
+          "kind": "Http",
+          "inputs": {
+            "schema": {
+              "type": "object",
+              "required": ["requestRecordId", "requestNumber", "totalAmount", "managerEmail", "requestorEmail"],
+              "properties": {
+                "requestRecordId": { "type": "integer" },
+                "requestNumber":   { "type": "string" },
+                "title":           { "type": "string" },
+                "totalAmount":     { "type": "number" },
+                "departmentId":    { "type": "integer" },
+                "budgetCode":      { "type": "string" },
+                "vendorId":        { "type": "integer" },
+                "vendorName":      { "type": "string" },
+                "category":        { "type": "string" },
+                "requestorName":   { "type": "string" },
+                "requestorEmail":  { "type": "string" },
+                "managerEmail":    { "type": "string" },
+                "isUrgent":        { "type": "boolean" }
+              }
+            }
+          }
+        }
+      },
+      "actions": {
+
+        "Validate_Budget": {
+          "type": "Http",
+          "runAfter": {},
+          "inputs": {
+            "method": "POST",
+            "uri": "@parameters('BudgetValidatorUrl')",
+            "headers": { "Content-Type": "application/json" },
+            "body": {
+              "departmentId": "@triggerBody()?['departmentId']",
+              "requestAmount": "@triggerBody()?['totalAmount']",
+              "vendorId":     "@triggerBody()?['vendorId']"
+            }
+          }
+        },
+
+        "Parse_Validation": {
+          "type": "ParseJson",
+          "runAfter": { "Validate_Budget": ["Succeeded", "Failed"] },
+          "inputs": {
+            "content": "@if(equals(outputs('Validate_Budget')['statusCode'], 200), body('Validate_Budget'), json('{\"budgetWarning\": false, \"vendorWarning\": false, \"availableBudget\": 0}'))",
+            "schema": {
+              "type": "object",
+              "properties": {
+                "budgetWarning":    { "type": "boolean" },
+                "vendorWarning":    { "type": "boolean" },
+                "availableBudget":  { "type": "number" },
+                "budgetUtilization":{ "type": "number" }
+              }
+            }
+          }
+        },
+
+        "Update_QB_With_Warnings": {
+          "type": "Http",
+          "runAfter": { "Parse_Validation": ["Succeeded"] },
+          "inputs": {
+            "method": "POST",
+            "uri": "https://api.quickbase.com/v1/records",
+            "headers": {
+              "QB-Realm-Hostname": "@parameters('QBRealmHostname')",
+              "Authorization": "QB-USER-TOKEN @{parameters('QBUserToken')}",
+              "Content-Type": "application/json"
+            },
+            "body": {
+              "to": "@parameters('QBRequestsTableId')",
+              "data": [{
+                "3":  { "value": "@triggerBody()?['requestRecordId']" },
+                "19": { "value": "Level 1 Pending" },
+                "21": { "value": 1 },
+                "34": { "value": "@body('Parse_Validation')?['availableBudget']" },
+                "35": { "value": "@body('Parse_Validation')?['budgetWarning']" }
+              }]
+            }
+          }
+        },
+
+        "Build_Approval_Details": {
+          "type": "Compose",
+          "runAfter": { "Update_QB_With_Warnings": ["Succeeded"] },
+          "inputs": "@concat(\n  'Request: ', triggerBody()?['requestNumber'], ' — ', triggerBody()?['title'],\n  '\nAmount: R', string(triggerBody()?['totalAmount']),\n  '\nCategory: ', triggerBody()?['category'],\n  '\nVendor: ', triggerBody()?['vendorName'],\n  '\nBudget Code: ', triggerBody()?['budgetCode'],\n  '\nRequestor: ', triggerBody()?['requestorName'],\n  '\nAvailable Budget: R', string(body('Parse_Validation')?['availableBudget']),\n  if(body('Parse_Validation')?['budgetWarning'], '\n⚠ WARNING: This request exceeds available budget.', ''),\n  if(body('Parse_Validation')?['vendorWarning'], '\n⚠ WARNING: Vendor is not on the approved supplier list.', '')\n)"
+        },
+
+        "Send_Level_1_Approval": {
+          "type": "ApiConnectionWebhook",
+          "runAfter": { "Build_Approval_Details": ["Succeeded"] },
+          "inputs": {
+            "host": { "connection": { "name": "@parameters('$connections')['approvals']['connectionId']" } },
+            "method": "post",
+            "path": "/approvalRequestCompleted",
+            "body": {
+              "NotificationUrl": "@{listCallbackUrl()}",
+              "ApprovalRequest": {
+                "title": "@{if(triggerBody()?['isUrgent'], '⚡ URGENT – ', '')}Approval Required: @{triggerBody()?['requestNumber']} – R@{triggerBody()?['totalAmount']}",
+                "requestor": "@{triggerBody()?['requestorEmail']}",
+                "approvers": [ "@{triggerBody()?['managerEmail']}" ],
+                "details": "@{outputs('Build_Approval_Details')}",
+                "itemLink": "https://yourcompany.quickbase.com/nav/app/{{appId}}/action/record?rid=@{triggerBody()?['requestRecordId']}",
+                "itemLinkDescription": "View Full Request"
+              }
+            }
+          }
+        },
+
+        "Log_Level_1_Sent": {
+          "type": "Http",
+          "runAfter": { "Send_Level_1_Approval": ["Succeeded"] },
+          "inputs": {
+            "method": "POST",
+            "uri": "https://api.quickbase.com/v1/records",
+            "headers": {
+              "QB-Realm-Hostname": "@parameters('QBRealmHostname')",
+              "Authorization": "QB-USER-TOKEN @{parameters('QBUserToken')}",
+              "Content-Type": "application/json"
+            },
+            "body": {
+              "to": "@parameters('QBApprovalHistoryId')",
+              "data": [{
+                "6":  { "value": "@triggerBody()?['requestRecordId']" },
+                "7":  { "value": 1 },
+                "9":  { "value": "@triggerBody()?['managerEmail']" },
+                "14": { "value": "@utcNow()" },
+                "15": { "value": "Email" }
+              }]
+            }
+          }
+        },
+
+        "Route_After_Level_1_Decision": {
+          "type": "Condition",
+          "runAfter": { "Send_Level_1_Approval": ["Succeeded"] },
+          "expression": { "equals": ["@body('Send_Level_1_Approval')?['outcome']", "Approve"] },
+          "actions": {
+            "Trigger_Next_Level_Routing": {
+              "type": "Http",
+              "inputs": {
+                "method": "POST",
+                "uri": "@parameters('ApprovalRoutingUrl')",
+                "body": {
+                  "requestRecordId":   "@triggerBody()?['requestRecordId']",
+                  "requestNumber":     "@triggerBody()?['requestNumber']",
+                  "title":             "@triggerBody()?['title']",
+                  "totalAmount":       "@triggerBody()?['totalAmount']",
+                  "category":          "@triggerBody()?['category']",
+                  "vendorName":        "@triggerBody()?['vendorName']",
+                  "budgetCode":        "@triggerBody()?['budgetCode']",
+                  "requestorName":     "@triggerBody()?['requestorName']",
+                  "requestorEmail":    "@triggerBody()?['requestorEmail']",
+                  "isUrgent":          "@triggerBody()?['isUrgent']",
+                  "completedLevel":    1,
+                  "approverComments":  "@body('Send_Level_1_Approval')?['comments']",
+                  "approverName":      "@body('Send_Level_1_Approval')?['approverName']",
+                  "approverEmail":     "@triggerBody()?['managerEmail']",
+                  "availableBudget":   "@body('Parse_Validation')?['availableBudget']",
+                  "budgetWarning":     "@body('Parse_Validation')?['budgetWarning']"
+                }
+              }
+            }
+          },
+          "else": {
+            "actions": {
+              "Update_QB_Rejected_L1": {
+                "type": "Http",
+                "inputs": {
+                  "method": "POST",
+                  "uri": "https://api.quickbase.com/v1/records",
+                  "headers": {
+                    "QB-Realm-Hostname": "@parameters('QBRealmHostname')",
+                    "Authorization": "QB-USER-TOKEN @{parameters('QBUserToken')}",
+                    "Content-Type": "application/json"
+                  },
+                  "body": {
+                    "to": "@parameters('QBRequestsTableId')",
+                    "data": [{
+                      "3":  { "value": "@triggerBody()?['requestRecordId']" },
+                      "19": { "value": "Rejected" },
+                      "28": { "value": "@body('Send_Level_1_Approval')?['approverName']" },
+                      "29": { "value": "@body('Send_Level_1_Approval')?['comments']" }
+                    }]
+                  }
+                }
+              }
+            }
+          }
+        }
+
+      }
+    }
+  }
+}

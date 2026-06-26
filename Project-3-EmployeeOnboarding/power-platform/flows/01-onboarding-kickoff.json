@@ -1,0 +1,176 @@
+﻿{
+  "properties": {
+    "displayName": "OB-01 Onboarding Kickoff — Welcome & Stakeholder Notifications",
+    "description": "Triggered when a new employee record is created. Sends personalised welcome emails to the new hire and all stakeholders (Manager, Buddy, IT, HR), posts a welcome card to the team's Teams channel, and confirms that task generation has been initiated.",
+    "state": "Started",
+    "definition": {
+      "$schema": "https://schema.management.azure.com/providers/Microsoft.Logic/schemas/2016-06-01/workflowdefinition.json#",
+      "contentVersion": "1.0.0.0",
+      "parameters": {
+        "$connections": { "defaultValue": {}, "type": "Object" },
+        "$authentication": { "defaultValue": {}, "type": "SecureObject" },
+        "QBRealmHostname":       { "defaultValue": "yourcompany.quickbase.com", "type": "String" },
+        "QBUserToken":           { "defaultValue": "", "type": "SecureString" },
+        "QBEmployeesTableId":    { "defaultValue": "", "type": "String" },
+        "HREmail":               { "defaultValue": "hr@yourcompany.com", "type": "String" },
+        "TeamsWelcomeWebhookUrl":{ "defaultValue": "", "type": "String" }
+      },
+      "triggers": {
+        "When_HTTP_Request_Received": {
+          "type": "Request",
+          "kind": "Http",
+          "inputs": {
+            "schema": {
+              "type": "object",
+              "required": ["employeeRecordId", "firstName", "lastName", "personalEmail", "startDate", "department", "managerEmail"],
+              "properties": {
+                "employeeRecordId": { "type": "integer" },
+                "employeeId":       { "type": "string" },
+                "firstName":        { "type": "string" },
+                "lastName":         { "type": "string" },
+                "personalEmail":    { "type": "string" },
+                "workEmail":        { "type": "string" },
+                "jobTitle":         { "type": "string" },
+                "department":       { "type": "string" },
+                "startDate":        { "type": "string" },
+                "employmentType":   { "type": "string" },
+                "workLocation":     { "type": "string" },
+                "managerName":      { "type": "string" },
+                "managerEmail":     { "type": "string" },
+                "buddyName":        { "type": "string" },
+                "buddyEmail":       { "type": "string" },
+                "tasksCreated":     { "type": "integer" }
+              }
+            }
+          }
+        }
+      },
+      "actions": {
+
+        "Format_Start_Date": {
+          "type": "Compose",
+          "runAfter": {},
+          "inputs": "@formatDateTime(triggerBody()?['startDate'], 'dddd, d MMMM yyyy')"
+        },
+
+        "Send_Welcome_to_New_Hire": {
+          "type": "ApiConnection",
+          "runAfter": { "Format_Start_Date": ["Succeeded"] },
+          "inputs": {
+            "host": { "connection": { "name": "@parameters('$connections')['office365']['connectionId']" } },
+            "method": "post",
+            "path": "/v2/Mail/Send",
+            "body": {
+              "To": "@triggerBody()?['personalEmail']",
+              "Subject": "Welcome to the team, @{triggerBody()?['firstName']}! 🎉 Your onboarding starts @{outputs('Format_Start_Date')}",
+              "Body": "<div style='font-family:Arial,sans-serif;max-width:600px'><div style='background:#2C3E50;padding:24px;border-radius:8px 8px 0 0'><h1 style='color:#fff;margin:0'>Welcome, @{triggerBody()?['firstName']}! 👋</h1></div><div style='padding:24px;border:1px solid #eee;border-radius:0 0 8px 8px'><p>We are thrilled to have you joining us as <b>@{triggerBody()?['jobTitle']}</b> in the <b>@{triggerBody()?['department']}</b> team.</p><h3>Your start details</h3><table style='border-collapse:collapse;width:100%'><tr><td style='padding:8px;font-weight:bold;background:#f8f8f8'>Start Date</td><td style='padding:8px'>@{outputs('Format_Start_Date')}</td></tr><tr><td style='padding:8px;font-weight:bold;background:#f8f8f8'>Your Manager</td><td style='padding:8px'>@{triggerBody()?['managerName']}</td></tr><tr><td style='padding:8px;font-weight:bold;background:#f8f8f8'>Your Buddy</td><td style='padding:8px'>@{coalesce(triggerBody()?['buddyName'], 'To be assigned')}</td></tr><tr><td style='padding:8px;font-weight:bold;background:#f8f8f8'>Work Location</td><td style='padding:8px'>@{triggerBody()?['workLocation']}</td></tr></table><h3>What happens next?</h3><ol><li>Our IT team will set up your accounts within the next 5 working days.</li><li>You will receive your equipment details 2 days before your start.</li><li>Your buddy will reach out to answer any questions.</li><li>On Day 1, your manager will guide you through orientation.</li></ol><p>In the meantime, if you have any questions contact HR at <a href='mailto:@{parameters('HREmail')}'>@{parameters('HREmail')}</a>.</p><p>We cannot wait to have you! 🚀</p><p><b>The HR Team</b></p></div></div>",
+              "IsHtml": true
+            }
+          }
+        },
+
+        "Send_Manager_Briefing": {
+          "type": "ApiConnection",
+          "runAfter": { "Send_Welcome_to_New_Hire": ["Succeeded"] },
+          "inputs": {
+            "host": { "connection": { "name": "@parameters('$connections')['office365']['connectionId']" } },
+            "method": "post",
+            "path": "/v2/Mail/Send",
+            "body": {
+              "To": "@triggerBody()?['managerEmail']",
+              "Subject": "New Hire Alert: @{triggerBody()?['firstName']} @{triggerBody()?['lastName']} joins on @{outputs('Format_Start_Date')}",
+              "Body": "<p>Hi @{triggerBody()?['managerName']},</p><p><b>@{triggerBody()?['firstName']} @{triggerBody()?['lastName']}</b> has been added to the onboarding system. Their start date is <b>@{outputs('Format_Start_Date')}</b>.</p><p>A total of <b>@{triggerBody()?['tasksCreated']}</b> onboarding tasks have been created and assigned. Your manager tasks are already visible in the portal.</p><h3>Your immediate actions:</h3><ul><li>Review and confirm your Day 1 tasks in the onboarding portal</li><li>Book a Day 1 orientation session in your calendar</li><li>Confirm buddy assignment (current: @{coalesce(triggerBody()?['buddyName'], 'not yet assigned')})</li></ul><p><a href='https://yourcompany.quickbase.com/nav/app/{{appId}}'>Open Onboarding Portal</a></p>",
+              "IsHtml": true
+            }
+          }
+        },
+
+        "Send_IT_Provisioning_Request": {
+          "type": "ApiConnection",
+          "runAfter": { "Send_Manager_Briefing": ["Succeeded"] },
+          "inputs": {
+            "host": { "connection": { "name": "@parameters('$connections')['office365']['connectionId']" } },
+            "method": "post",
+            "path": "/v2/Mail/Send",
+            "body": {
+              "To": "it-provisioning@yourcompany.com",
+              "Subject": "New Hire IT Setup Required: @{triggerBody()?['firstName']} @{triggerBody()?['lastName']} — Starts @{outputs('Format_Start_Date')}",
+              "Body": "<p>IT Action Required</p><table style='border-collapse:collapse;width:100%'><tr style='background:#2C3E50;color:#fff'><th style='padding:8px;text-align:left'>Field</th><th style='padding:8px;text-align:left'>Value</th></tr><tr><td style='padding:8px;font-weight:bold'>Name</td><td style='padding:8px'>@{triggerBody()?['firstName']} @{triggerBody()?['lastName']}</td></tr><tr><td style='padding:8px;font-weight:bold'>Employee ID</td><td style='padding:8px'>@{triggerBody()?['employeeId']}</td></tr><tr><td style='padding:8px;font-weight:bold'>Job Title</td><td style='padding:8px'>@{triggerBody()?['jobTitle']}</td></tr><tr><td style='padding:8px;font-weight:bold'>Department</td><td style='padding:8px'>@{triggerBody()?['department']}</td></tr><tr><td style='padding:8px;font-weight:bold'>Start Date</td><td style='padding:8px'>@{outputs('Format_Start_Date')}</td></tr><tr><td style='padding:8px;font-weight:bold'>Work Location</td><td style='padding:8px'>@{triggerBody()?['workLocation']}</td></tr><tr><td style='padding:8px;font-weight:bold'>Manager</td><td style='padding:8px'>@{triggerBody()?['managerName']} (@{triggerBody()?['managerEmail']})</td></tr></table><p><b>Required actions (see IT tasks in onboarding portal):</b></p><ol><li>Create Active Directory account</li><li>Assign M365 license and work email</li><li>Add to department security groups</li><li>Order equipment per manager's request</li></ol>",
+              "IsHtml": true
+            }
+          }
+        },
+
+        "Send_Buddy_Introduction": {
+          "type": "Condition",
+          "runAfter": { "Send_IT_Provisioning_Request": ["Succeeded"] },
+          "expression": { "and": [
+            { "not": { "equals": ["@triggerBody()?['buddyEmail']", ""] } },
+            { "not": { "equals": ["@triggerBody()?['buddyEmail']", null] } }
+          ]},
+          "actions": {
+            "Email_Buddy": {
+              "type": "ApiConnection",
+              "inputs": {
+                "host": { "connection": { "name": "@parameters('$connections')['office365']['connectionId']" } },
+                "method": "post",
+                "path": "/v2/Mail/Send",
+                "body": {
+                  "To": "@triggerBody()?['buddyEmail']",
+                  "Subject": "You have a new buddy! @{triggerBody()?['firstName']} @{triggerBody()?['lastName']} joins on @{outputs('Format_Start_Date')}",
+                  "Body": "<p>Hi @{triggerBody()?['buddyName']},</p><p>You have been assigned as the onboarding buddy for <b>@{triggerBody()?['firstName']} @{triggerBody()?['lastName']}</b>, who is joining as <b>@{triggerBody()?['jobTitle']}</b> on <b>@{outputs('Format_Start_Date')}</b>.</p><p>Your buddy tasks are in the onboarding portal. Please reach out to @{triggerBody()?['firstName']} before Day 1 to introduce yourself.</p><p>Personal email: <a href='mailto:@{triggerBody()?['personalEmail']}'>@{triggerBody()?['personalEmail']}</a></p>",
+                  "IsHtml": true
+                }
+              }
+            }
+          },
+          "else": { "actions": {} }
+        },
+
+        "Post_Welcome_to_Teams": {
+          "type": "Http",
+          "runAfter": { "Send_Buddy_Introduction": ["Succeeded"] },
+          "inputs": {
+            "method": "POST",
+            "uri": "@parameters('TeamsWelcomeWebhookUrl')",
+            "body": {
+              "type": "message",
+              "attachments": [{
+                "contentType": "application/vnd.microsoft.card.adaptive",
+                "content": {
+                  "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
+                  "type": "AdaptiveCard",
+                  "version": "1.4",
+                  "body": [
+                    { "type": "Container", "style": "accent", "items": [
+                      { "type": "TextBlock", "text": "🎉 New Team Member Incoming!", "weight": "Bolder", "size": "Large" }
+                    ]},
+                    { "type": "TextBlock", "text": "@{triggerBody()?['firstName']} @{triggerBody()?['lastName']} is joining as **@{triggerBody()?['jobTitle']}**", "wrap": true, "weight": "Bolder", "size": "Medium" },
+                    { "type": "FactSet", "facts": [
+                      { "title": "Department",    "value": "@{triggerBody()?['department']}" },
+                      { "title": "Start Date",    "value": "@{outputs('Format_Start_Date')}" },
+                      { "title": "Work Location", "value": "@{triggerBody()?['workLocation']}" },
+                      { "title": "Manager",       "value": "@{triggerBody()?['managerName']}" },
+                      { "title": "Buddy",         "value": "@{coalesce(triggerBody()?['buddyName'], 'TBD')}" }
+                    ]},
+                    { "type": "TextBlock", "text": "Please give @{triggerBody()?['firstName']} a warm welcome on their first day! 👋", "wrap": true, "isSubtle": true }
+                  ]
+                }
+              }]
+            }
+          }
+        },
+
+        "Return_Success": {
+          "type": "Response",
+          "runAfter": { "Post_Welcome_to_Teams": ["Succeeded", "Failed"] },
+          "inputs": {
+            "statusCode": 200,
+            "body": { "result": "Onboarding kickoff complete", "employeeId": "@triggerBody()?['employeeId']" }
+          }
+        }
+
+      }
+    }
+  }
+}

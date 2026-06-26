@@ -1,0 +1,210 @@
+{
+  "properties": {
+    "displayName": "HUB-01 Retry Dead Letter Queue Events",
+    "description": "Runs every 30 minutes. Queries the Quickbase Dead Letter Queue for pending events. For each, calls the integration hub API to retry the event with its original payload. Marks resolved or abandons after 5 total retries.",
+    "state": "Started",
+    "definition": {
+      "$schema": "https://schema.management.azure.com/providers/Microsoft.Logic/schemas/2016-06-01/workflowdefinition.json#",
+      "contentVersion": "1.0.0.0",
+      "parameters": {
+        "$connections":   { "defaultValue": {}, "type": "Object" },
+        "$authentication":{ "defaultValue": {}, "type": "SecureObject" },
+        "QBRealmHostname":{ "defaultValue": "yourcompany.quickbase.com", "type": "String" },
+        "QBUserToken":    { "defaultValue": "", "type": "SecureString" },
+        "QBDLQTableId":   { "defaultValue": "", "type": "String" },
+        "QBEventsTableId":{ "defaultValue": "", "type": "String" },
+        "HubRetryUrl":    { "defaultValue": "", "type": "String" },
+        "MaxRetries":     { "defaultValue": 5,  "type": "Integer" }
+      },
+      "triggers": {
+        "Recurrence_Every_30min": {
+          "type": "Recurrence",
+          "recurrence": { "frequency": "Minute", "interval": 30 }
+        }
+      },
+      "actions": {
+
+        "Get_Pending_DLQ_Events": {
+          "type": "Http",
+          "runAfter": {},
+          "inputs": {
+            "method": "POST",
+            "uri": "https://api.quickbase.com/v1/records/query",
+            "headers": {
+              "QB-Realm-Hostname": "@parameters('QBRealmHostname')",
+              "Authorization": "QB-USER-TOKEN @{parameters('QBUserToken')}",
+              "Content-Type": "application/json"
+            },
+            "body": {
+              "from": "@parameters('QBDLQTableId')",
+              "select": [3, 6, 7, 8, 10, 11, 12, 13],
+              "where": "{15.EX.'Pending'}",
+              "sortBy": [{ "fieldId": 13, "order": "ASC" }],
+              "options": { "top": 20 }
+            }
+          }
+        },
+
+        "Parse_DLQ_Events": {
+          "type": "ParseJson",
+          "runAfter": { "Get_Pending_DLQ_Events": ["Succeeded"] },
+          "inputs": {
+            "content": "@body('Get_Pending_DLQ_Events')",
+            "schema": {
+              "type": "object",
+              "properties": {
+                "data": { "type": "array" },
+                "metadata": { "type": "object", "properties": { "numRecords": { "type": "integer" } } }
+              }
+            }
+          }
+        },
+
+        "Initialize_Retry_Counters": {
+          "type": "InitializeVariable",
+          "runAfter": { "Parse_DLQ_Events": ["Succeeded"] },
+          "inputs": {
+            "variables": [
+              { "name": "RetriedCount",   "type": "integer", "value": 0 },
+              { "name": "ResolvedCount",  "type": "integer", "value": 0 },
+              { "name": "AbandonedCount", "type": "integer", "value": 0 }
+            ]
+          }
+        },
+
+        "For_Each_DLQ_Event": {
+          "type": "Foreach",
+          "runAfter": { "Initialize_Retry_Counters": ["Succeeded"] },
+          "foreach": "@body('Parse_DLQ_Events')?['data']",
+          "actions": {
+
+            "Check_Max_Retries": {
+              "type": "Condition",
+              "expression": {
+                "greaterOrEquals": [
+                  "@items('For_Each_DLQ_Event')?['12']?['value']",
+                  "@parameters('MaxRetries')"
+                ]
+              },
+              "actions": {
+                "Abandon_Event": {
+                  "type": "Http",
+                  "inputs": {
+                    "method": "POST",
+                    "uri": "https://api.quickbase.com/v1/records",
+                    "headers": { "QB-Realm-Hostname": "@parameters('QBRealmHostname')", "Authorization": "QB-USER-TOKEN @{parameters('QBUserToken')}", "Content-Type": "application/json" },
+                    "body": {
+                      "to": "@parameters('QBDLQTableId')",
+                      "data": [{ "3": { "value": "@items('For_Each_DLQ_Event')?['3']?['value']" }, "15": { "value": "Abandoned" } }]
+                    }
+                  }
+                },
+                "Increment_Abandoned": {
+                  "type": "IncrementVariable",
+                  "runAfter": { "Abandon_Event": ["Succeeded"] },
+                  "inputs": { "name": "AbandonedCount", "value": 1 }
+                }
+              },
+              "else": {
+                "actions": {
+                  "Update_DLQ_Retrying": {
+                    "type": "Http",
+                    "inputs": {
+                      "method": "POST",
+                      "uri": "https://api.quickbase.com/v1/records",
+                      "headers": { "QB-Realm-Hostname": "@parameters('QBRealmHostname')", "Authorization": "QB-USER-TOKEN @{parameters('QBUserToken')}", "Content-Type": "application/json" },
+                      "body": {
+                        "to": "@parameters('QBDLQTableId')",
+                        "data": [{
+                          "3":  { "value": "@items('For_Each_DLQ_Event')?['3']?['value']" },
+                          "15": { "value": "Retrying" },
+                          "14": { "value": "@utcNow()" },
+                          "12": { "value": "@add(items('For_Each_DLQ_Event')?['12']?['value'], 1)" }
+                        }]
+                      }
+                    }
+                  },
+
+                  "Call_Hub_Retry_Endpoint": {
+                    "type": "Http",
+                    "runAfter": { "Update_DLQ_Retrying": ["Succeeded"] },
+                    "inputs": {
+                      "method": "POST",
+                      "uri": "@parameters('HubRetryUrl')",
+                      "headers": { "Content-Type": "application/json" },
+                      "body": {
+                        "dlqRecordId":   "@items('For_Each_DLQ_Event')?['3']?['value']",
+                        "eventId":        "@items('For_Each_DLQ_Event')?['6']?['value']",
+                        "sourceSystem":   "@items('For_Each_DLQ_Event')?['7']?['value']",
+                        "eventType":      "@items('For_Each_DLQ_Event')?['8']?['value']",
+                        "originalPayload":"@items('For_Each_DLQ_Event')?['10']?['value']"
+                      }
+                    }
+                  },
+
+                  "Retry_Succeeded": {
+                    "type": "Condition",
+                    "runAfter": { "Call_Hub_Retry_Endpoint": ["Succeeded"] },
+                    "expression": { "equals": ["@outputs('Call_Hub_Retry_Endpoint')['statusCode']", 200] },
+                    "actions": {
+                      "Mark_DLQ_Resolved": {
+                        "type": "Http",
+                        "inputs": {
+                          "method": "POST",
+                          "uri": "https://api.quickbase.com/v1/records",
+                          "headers": { "QB-Realm-Hostname": "@parameters('QBRealmHostname')", "Authorization": "QB-USER-TOKEN @{parameters('QBUserToken')}", "Content-Type": "application/json" },
+                          "body": {
+                            "to": "@parameters('QBDLQTableId')",
+                            "data": [{ "3": { "value": "@items('For_Each_DLQ_Event')?['3']?['value']" }, "15": { "value": "Resolved" } }]
+                          }
+                        }
+                      },
+                      "Increment_Resolved": {
+                        "type": "IncrementVariable",
+                        "runAfter": { "Mark_DLQ_Resolved": ["Succeeded"] },
+                        "inputs": { "name": "ResolvedCount", "value": 1 }
+                      }
+                    },
+                    "else": {
+                      "actions": {
+                        "Mark_DLQ_Pending_Again": {
+                          "type": "Http",
+                          "inputs": {
+                            "method": "POST",
+                            "uri": "https://api.quickbase.com/v1/records",
+                            "headers": { "QB-Realm-Hostname": "@parameters('QBRealmHostname')", "Authorization": "QB-USER-TOKEN @{parameters('QBUserToken')}", "Content-Type": "application/json" },
+                            "body": { "to": "@parameters('QBDLQTableId')", "data": [{ "3": { "value": "@items('For_Each_DLQ_Event')?['3']?['value']" }, "15": { "value": "Pending" } }] }
+                          }
+                        }
+                      }
+                    }
+                  },
+                  "Increment_Retried": {
+                    "type": "IncrementVariable",
+                    "runAfter": { "Retry_Succeeded": ["Succeeded"] },
+                    "inputs": { "name": "RetriedCount", "value": 1 }
+                  }
+                }
+              }
+            }
+          }
+        },
+
+        "Return_Summary": {
+          "type": "Response",
+          "runAfter": { "For_Each_DLQ_Event": ["Succeeded"] },
+          "inputs": {
+            "statusCode": 200,
+            "body": {
+              "totalProcessed": "@body('Parse_DLQ_Events')?['metadata']?['numRecords']",
+              "retried":   "@variables('RetriedCount')",
+              "resolved":  "@variables('ResolvedCount')",
+              "abandoned": "@variables('AbandonedCount')"
+            }
+          }
+        }
+
+      }
+    }
+  }
+}

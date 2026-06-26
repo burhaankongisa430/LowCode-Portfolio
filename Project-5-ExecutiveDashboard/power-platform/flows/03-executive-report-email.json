@@ -1,0 +1,118 @@
+{
+  "properties": {
+    "displayName": "EXEC-03 Weekly Executive Report Email",
+    "description": "Triggered by the Python scheduler every Monday at 06:30 SAST. Receives the pre-generated HTML report from the Python report_generator.py and distributes it to the executive distribution list.",
+    "state": "Started",
+    "definition": {
+      "$schema": "https://schema.management.azure.com/providers/Microsoft.Logic/schemas/2016-06-01/workflowdefinition.json#",
+      "contentVersion": "1.0.0.0",
+      "parameters": {
+        "$connections":          { "defaultValue": {}, "type": "Object" },
+        "$authentication":       { "defaultValue": {}, "type": "SecureObject" },
+        "ExecDistributionList":  { "defaultValue": "executives@yourcompany.com", "type": "String" },
+        "TeamsWebhookUrl":       { "defaultValue": "", "type": "String" }
+      },
+      "triggers": {
+        "When_HTTP_Request_Received": {
+          "type": "Request",
+          "kind": "Http",
+          "inputs": {
+            "schema": {
+              "type": "object",
+              "required": ["reportHtml", "reportDate", "healthScore", "healthStatus"],
+              "properties": {
+                "reportHtml":       { "type": "string" },
+                "reportDate":       { "type": "string" },
+                "reportSubject":    { "type": "string" },
+                "healthScore":      { "type": "number" },
+                "healthStatus":     { "type": "string" },
+                "operationalScore": { "type": "number" },
+                "commercialScore":  { "type": "number" },
+                "peopleScore":      { "type": "number" },
+                "financeScore":     { "type": "number" },
+                "topAlert":         { "type": "string" },
+                "additionalRecipients": { "type": "string" }
+              }
+            }
+          }
+        }
+      },
+      "actions": {
+
+        "Send_Executive_Report": {
+          "type": "ApiConnection",
+          "runAfter": {},
+          "inputs": {
+            "host": { "connection": { "name": "@parameters('$connections')['office365']['connectionId']" } },
+            "method": "post",
+            "path": "/v2/Mail/Send",
+            "body": {
+              "To": "@parameters('ExecDistributionList')",
+              "CC": "@triggerBody()?['additionalRecipients']",
+              "Subject": "@{coalesce(triggerBody()?['reportSubject'], concat('Weekly KPI Report — ', formatDateTime(utcNow(), 'd MMM yyyy'), ' | Health: ', string(triggerBody()?['healthScore']), '/100 (', triggerBody()?['healthStatus'], ')'))}",
+              "Body": "@triggerBody()?['reportHtml']",
+              "IsHtml": true,
+              "Importance": "@{if(less(triggerBody()?['healthScore'], 55), 'High', 'Normal')}"
+            }
+          }
+        },
+
+        "Post_Report_Link_to_Teams": {
+          "type": "Http",
+          "runAfter": { "Send_Executive_Report": ["Succeeded"] },
+          "inputs": {
+            "method": "POST",
+            "uri": "@parameters('TeamsWebhookUrl')",
+            "body": {
+              "type": "message",
+              "attachments": [{
+                "contentType": "application/vnd.microsoft.card.adaptive",
+                "content": {
+                  "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
+                  "type": "AdaptiveCard",
+                  "version": "1.4",
+                  "body": [
+                    { "type": "TextBlock", "text": "📋 Weekly Executive KPI Report", "weight": "Bolder", "size": "Large" },
+                    { "type": "TextBlock", "text": "@{formatDateTime(utcNow(), 'dddd, d MMMM yyyy')}", "isSubtle": true },
+                    {
+                      "type": "ColumnSet",
+                      "columns": [
+                        { "type": "Column", "width": 1, "items": [
+                          { "type": "TextBlock", "text": "Overall Health", "weight": "Bolder" },
+                          { "type": "TextBlock", "text": "@{triggerBody()?['healthScore']}/100", "size": "ExtraLarge", "color": "@{if(greaterOrEquals(triggerBody()?['healthScore'], 70), 'Good', if(greaterOrEquals(triggerBody()?['healthScore'], 55), 'Warning', 'Attention'))}" },
+                          { "type": "TextBlock", "text": "@{triggerBody()?['healthStatus']}", "isSubtle": true }
+                        ]},
+                        { "type": "Column", "width": 2, "items": [
+                          { "type": "FactSet", "facts": [
+                            { "title": "Operational",  "value": "@{triggerBody()?['operationalScore']}/100" },
+                            { "title": "Commercial",   "value": "@{triggerBody()?['commercialScore']}/100" },
+                            { "title": "People",       "value": "@{triggerBody()?['peopleScore']}/100" },
+                            { "title": "Finance",      "value": "@{triggerBody()?['financeScore']}/100" }
+                          ]}
+                        ]}
+                      ]
+                    },
+                    { "type": "TextBlock", "text": "📧 Full report emailed to executive team.", "isSubtle": true, "wrap": true }
+                  ],
+                  "actions": [
+                    { "type": "Action.OpenUrl", "title": "View Live Dashboard", "url": "https://app.powerbi.com/groups/{{workspaceId}}/dashboards/{{dashboardId}}" }
+                  ]
+                }
+              }]
+            }
+          }
+        },
+
+        "Return_Success": {
+          "type": "Response",
+          "runAfter": { "Post_Report_Link_to_Teams": ["Succeeded", "Failed"] },
+          "inputs": {
+            "statusCode": 200,
+            "body": { "result": "Executive report distributed", "reportDate": "@triggerBody()?['reportDate']" }
+          }
+        }
+
+      }
+    }
+  }
+}

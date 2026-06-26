@@ -1,0 +1,132 @@
+{
+  "properties": {
+    "displayName": "EXEC-04 Dataverse KPI Sync",
+    "description": "Triggered by the Python ETL pipeline after every run. Receives the computed KPI payload and writes/upserts a row to the Dataverse KPI_Snapshot table. Enables Power BI DirectQuery for near-real-time dashboard refresh without waiting for scheduled import.",
+    "state": "Started",
+    "definition": {
+      "$schema": "https://schema.management.azure.com/providers/Microsoft.Logic/schemas/2016-06-01/workflowdefinition.json#",
+      "contentVersion": "1.0.0.0",
+      "parameters": {
+        "$connections":      { "defaultValue": {}, "type": "Object" },
+        "$authentication":   { "defaultValue": {}, "type": "SecureObject" },
+        "DataverseEnvironment": { "defaultValue": "https://yourorg.crm4.dynamics.com", "type": "String" }
+      },
+      "triggers": {
+        "When_HTTP_Request_Received": {
+          "type": "Request",
+          "kind": "Http",
+          "inputs": {
+            "schema": {
+              "type": "object",
+              "required": ["snapshotTime", "healthScore", "operationalScore", "commercialScore", "peopleScore", "financeScore"],
+              "properties": {
+                "snapshotTime":        { "type": "string" },
+                "healthScore":         { "type": "number" },
+                "healthStatus":        { "type": "string" },
+                "operationalScore":    { "type": "number" },
+                "commercialScore":     { "type": "number" },
+                "peopleScore":         { "type": "number" },
+                "financeScore":        { "type": "number" },
+                "slaMedRate":          { "type": "number" },
+                "activeBreaches":      { "type": "integer" },
+                "avgResolutionHours":  { "type": "number" },
+                "openTickets":         { "type": "integer" },
+                "weightedPipeline":    { "type": "number" },
+                "wonRevenueMtd":       { "type": "number" },
+                "winRate":             { "type": "number" },
+                "quotaAttainment":     { "type": "number" },
+                "stalledDeals":        { "type": "integer" },
+                "activeOnboarding":    { "type": "integer" },
+                "onboardingOnTrack":   { "type": "number" },
+                "avgCompletionDays":   { "type": "number" },
+                "day1ReadinessRate":   { "type": "number" },
+                "committedSpendMtd":   { "type": "number" },
+                "avgBudgetUtil":       { "type": "number" },
+                "pendingApprovals":    { "type": "integer" },
+                "approvalCycleDays":   { "type": "number" },
+                "domainsAvailable":    { "type": "integer" },
+                "alerts":              { "type": "array" }
+              }
+            }
+          }
+        }
+      },
+      "actions": {
+
+        "Upsert_KPI_Snapshot_to_Dataverse": {
+          "type": "ApiConnection",
+          "runAfter": {},
+          "inputs": {
+            "host": { "connection": { "name": "@parameters('$connections')['commondataservice']['connectionId']" } },
+            "method": "patch",
+            "path": "/v2/datasets/@{encodeURIComponent(encodeURIComponent(parameters('DataverseEnvironment')))}/tables/@{encodeURIComponent(encodeURIComponent('cr_kpi_snapshots'))}/items",
+            "body": {
+              "cr_snapshot_time":        "@triggerBody()?['snapshotTime']",
+              "cr_health_score":         "@triggerBody()?['healthScore']",
+              "cr_health_status":        "@triggerBody()?['healthStatus']",
+              "cr_operational_score":    "@triggerBody()?['operationalScore']",
+              "cr_commercial_score":     "@triggerBody()?['commercialScore']",
+              "cr_people_score":         "@triggerBody()?['peopleScore']",
+              "cr_finance_score":        "@triggerBody()?['financeScore']",
+              "cr_sla_met_rate":         "@triggerBody()?['slaMedRate']",
+              "cr_active_breaches":      "@triggerBody()?['activeBreaches']",
+              "cr_avg_resolution_hours": "@triggerBody()?['avgResolutionHours']",
+              "cr_open_tickets":         "@triggerBody()?['openTickets']",
+              "cr_weighted_pipeline":    "@triggerBody()?['weightedPipeline']",
+              "cr_won_revenue_mtd":      "@triggerBody()?['wonRevenueMtd']",
+              "cr_win_rate":             "@triggerBody()?['winRate']",
+              "cr_quota_attainment":     "@triggerBody()?['quotaAttainment']",
+              "cr_stalled_deals":        "@triggerBody()?['stalledDeals']",
+              "cr_active_onboarding":    "@triggerBody()?['activeOnboarding']",
+              "cr_onboarding_on_track":  "@triggerBody()?['onboardingOnTrack']",
+              "cr_avg_completion_days":  "@triggerBody()?['avgCompletionDays']",
+              "cr_day1_readiness_rate":  "@triggerBody()?['day1ReadinessRate']",
+              "cr_committed_spend_mtd":  "@triggerBody()?['committedSpendMtd']",
+              "cr_avg_budget_util":      "@triggerBody()?['avgBudgetUtil']",
+              "cr_pending_approvals":    "@triggerBody()?['pendingApprovals']",
+              "cr_approval_cycle_days":  "@triggerBody()?['approvalCycleDays']",
+              "cr_domains_available":    "@triggerBody()?['domainsAvailable']",
+              "cr_alert_count":          "@length(triggerBody()?['alerts'])"
+            }
+          }
+        },
+
+        "Write_Alerts_to_Dataverse": {
+          "type": "Foreach",
+          "runAfter": { "Upsert_KPI_Snapshot_to_Dataverse": ["Succeeded"] },
+          "foreach": "@triggerBody()?['alerts']",
+          "actions": {
+            "Create_Alert_Record": {
+              "type": "ApiConnection",
+              "inputs": {
+                "host": { "connection": { "name": "@parameters('$connections')['commondataservice']['connectionId']" } },
+                "method": "post",
+                "path": "/v2/datasets/@{encodeURIComponent(encodeURIComponent(parameters('DataverseEnvironment')))}/tables/@{encodeURIComponent(encodeURIComponent('cr_kpi_alerts'))}/items",
+                "body": {
+                  "cr_alert_time":      "@triggerBody()?['snapshotTime']",
+                  "cr_domain":          "@items('Write_Alerts_to_Dataverse')?['domain']",
+                  "cr_kpi_name":        "@items('Write_Alerts_to_Dataverse')?['kpiName']",
+                  "cr_current_value":   "@items('Write_Alerts_to_Dataverse')?['currentValue']",
+                  "cr_threshold_value": "@items('Write_Alerts_to_Dataverse')?['thresholdValue']",
+                  "cr_severity":        "@items('Write_Alerts_to_Dataverse')?['severity']",
+                  "cr_message":         "@items('Write_Alerts_to_Dataverse')?['message']",
+                  "cr_acknowledged":    false
+                }
+              }
+            }
+          }
+        },
+
+        "Return_Success": {
+          "type": "Response",
+          "runAfter": { "Write_Alerts_to_Dataverse": ["Succeeded"] },
+          "inputs": {
+            "statusCode": 200,
+            "body": { "result": "KPI snapshot synced to Dataverse", "alertsWritten": "@length(triggerBody()?['alerts'])" }
+          }
+        }
+
+      }
+    }
+  }
+}

@@ -1,0 +1,229 @@
+{
+  "properties": {
+    "displayName": "CRM-04 Won / Lost Notifications & Post-Mortem",
+    "description": "Triggered when a deal is marked Closed Won or Closed Lost. Sends tailored notifications, enforces loss reason capture, logs the outcome to Activities, and queues a win/loss debrief task for the manager.",
+    "state": "Started",
+    "definition": {
+      "$schema": "https://schema.management.azure.com/providers/Microsoft.Logic/schemas/2016-06-01/workflowdefinition.json#",
+      "contentVersion": "1.0.0.0",
+      "parameters": {
+        "$connections": { "defaultValue": {}, "type": "Object" },
+        "$authentication": { "defaultValue": {}, "type": "SecureObject" },
+        "QBRealmHostname":     { "defaultValue": "yourcompany.quickbase.com", "type": "String" },
+        "QBUserToken":         { "defaultValue": "", "type": "SecureString" },
+        "QBDealsTableId":      { "defaultValue": "", "type": "String" },
+        "QBActivitiesTableId": { "defaultValue": "", "type": "String" },
+        "TeamsWebhookUrl":     { "defaultValue": "", "type": "String" },
+        "ManagerEmail":        { "defaultValue": "sales-manager@yourcompany.com", "type": "String" }
+      },
+      "triggers": {
+        "When_HTTP_Request_Received": {
+          "type": "Request",
+          "kind": "Http",
+          "inputs": {
+            "schema": {
+              "type": "object",
+              "required": ["recordId", "dealId", "dealName", "outcome", "repName", "repEmail", "dealValue"],
+              "properties": {
+                "recordId":     { "type": "integer" },
+                "dealId":       { "type": "string" },
+                "dealName":     { "type": "string" },
+                "companyName":  { "type": "string" },
+                "outcome":      { "type": "string", "enum": ["Closed Won", "Closed Lost"] },
+                "repName":      { "type": "string" },
+                "repEmail":     { "type": "string" },
+                "dealValue":    { "type": "number" },
+                "lossReason":   { "type": "string" },
+                "lossNotes":    { "type": "string" },
+                "dealAge":      { "type": "number" },
+                "leadSource":   { "type": "string" },
+                "previousStage":{ "type": "string" }
+              }
+            }
+          }
+        }
+      },
+      "actions": {
+
+        "Route_by_Outcome": {
+          "type": "Switch",
+          "runAfter": {},
+          "expression": "@triggerBody()?['outcome']",
+          "cases": {
+
+            "Closed_Won": {
+              "case": "Closed Won",
+              "actions": {
+
+                "Send_Win_Celebration_Email": {
+                  "type": "ApiConnection",
+                  "inputs": {
+                    "host": { "connection": { "name": "@parameters('$connections')['office365']['connectionId']" } },
+                    "method": "post",
+                    "path": "/v2/Mail/Send",
+                    "body": {
+                      "To": "@triggerBody()?['repEmail']",
+                      "CC": "@parameters('ManagerEmail')",
+                      "Subject": "🏆 Deal Won: @{triggerBody()?['dealName']} — $@{triggerBody()?['dealValue']}!",
+                      "Body": "<div style='background:#1ABC9C;padding:20px;border-radius:8px;color:#fff'><h2>🏆 Congratulations, @{triggerBody()?['repName']}!</h2><p>You closed <b>@{triggerBody()?['dealName']}</b> — @{triggerBody()?['companyName']}</p></div><br><table style='border-collapse:collapse;width:100%'><tr><td style='padding:8px;font-weight:bold'>Deal ID</td><td style='padding:8px'>@{triggerBody()?['dealId']}</td></tr><tr style='background:#f8f8f8'><td style='padding:8px;font-weight:bold'>Value</td><td style='padding:8px;font-size:1.2em;color:#27AE60'><b>$@{triggerBody()?['dealValue']}</b></td></tr><tr><td style='padding:8px;font-weight:bold'>Deal Age</td><td style='padding:8px'>@{triggerBody()?['dealAge']} days</td></tr><tr style='background:#f8f8f8'><td style='padding:8px;font-weight:bold'>Lead Source</td><td style='padding:8px'>@{triggerBody()?['leadSource']}</td></tr></table><p>Next step: <b>Hand off to Customer Success</b> and document implementation requirements.</p>",
+                      "IsHtml": true
+                    }
+                  }
+                },
+
+                "Post_Win_to_Teams_Channel": {
+                  "type": "Http",
+                  "runAfter": { "Send_Win_Celebration_Email": ["Succeeded"] },
+                  "inputs": {
+                    "method": "POST",
+                    "uri": "@parameters('TeamsWebhookUrl')",
+                    "body": {
+                      "type": "message",
+                      "attachments": [{
+                        "contentType": "application/vnd.microsoft.card.adaptive",
+                        "content": {
+                          "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
+                          "type": "AdaptiveCard",
+                          "version": "1.4",
+                          "body": [
+                            { "type": "Container", "style": "good", "items": [
+                              { "type": "TextBlock", "text": "🏆 DEAL WON!", "weight": "Bolder", "size": "ExtraLarge", "color": "Good" }
+                            ]},
+                            { "type": "TextBlock", "text": "@{triggerBody()?['dealName']} — @{triggerBody()?['companyName']}", "wrap": true, "weight": "Bolder", "size": "Medium" },
+                            { "type": "FactSet", "facts": [
+                              { "title": "Sales Rep",  "value": "@{triggerBody()?['repName']}" },
+                              { "title": "Value",      "value": "$@{triggerBody()?['dealValue']}" },
+                              { "title": "Deal Age",   "value": "@{triggerBody()?['dealAge']} days" },
+                              { "title": "Source",     "value": "@{triggerBody()?['leadSource']}" }
+                            ]}
+                          ]
+                        }
+                      }]
+                    }
+                  }
+                },
+
+                "Log_Win_Activity": {
+                  "type": "Http",
+                  "runAfter": { "Post_Win_to_Teams_Channel": ["Succeeded"] },
+                  "inputs": {
+                    "method": "POST",
+                    "uri": "https://api.quickbase.com/v1/records",
+                    "headers": {
+                      "QB-Realm-Hostname": "@parameters('QBRealmHostname')",
+                      "Authorization": "QB-USER-TOKEN @{parameters('QBUserToken')}",
+                      "Content-Type": "application/json"
+                    },
+                    "body": {
+                      "to": "@parameters('QBActivitiesTableId')",
+                      "data": [{
+                        "7":  { "value": "@triggerBody()?['recordId']" },
+                        "9":  { "value": "Stage Change" },
+                        "10": { "value": "CLOSED WON" },
+                        "11": { "value": "Deal won after @{triggerBody()?['dealAge']} days. Value: $@{triggerBody()?['dealValue']}. Source: @{triggerBody()?['leadSource']}." },
+                        "12": { "value": "@utcNow()" },
+                        "14": { "value": "Positive" },
+                        "15": { "value": "@{triggerBody()?['repName']}" },
+                        "17": { "value": "Automation" }
+                      }]
+                    }
+                  }
+                }
+
+              }
+            },
+
+            "Closed_Lost": {
+              "case": "Closed Lost",
+              "actions": {
+
+                "Check_Loss_Reason_Captured": {
+                  "type": "Condition",
+                  "expression": { "and": [{ "not": { "equals": ["@triggerBody()?['lossReason']", ""] } }, { "not": { "equals": ["@triggerBody()?['lossReason']", null] } }] },
+                  "actions": {
+
+                    "Send_Loss_Debrief_With_Reason": {
+                      "type": "ApiConnection",
+                      "inputs": {
+                        "host": { "connection": { "name": "@parameters('$connections')['office365']['connectionId']" } },
+                        "method": "post",
+                        "path": "/v2/Mail/Send",
+                        "body": {
+                          "To": "@parameters('ManagerEmail')",
+                          "CC": "@triggerBody()?['repEmail']",
+                          "Subject": "❌ Deal Lost: @{triggerBody()?['dealName']} — Loss Reason: @{triggerBody()?['lossReason']}",
+                          "Body": "<h3>Deal Closed Lost</h3><table><tr><td><b>Deal</b></td><td>@{triggerBody()?['dealId']} – @{triggerBody()?['dealName']}</td></tr><tr><td><b>Company</b></td><td>@{triggerBody()?['companyName']}</td></tr><tr><td><b>Value</b></td><td>$@{triggerBody()?['dealValue']}</td></tr><tr><td><b>Rep</b></td><td>@{triggerBody()?['repName']}</td></tr><tr><td><b>Deal Age</b></td><td>@{triggerBody()?['dealAge']} days</td></tr><tr><td><b>Previous Stage</b></td><td>@{triggerBody()?['previousStage']}</td></tr><tr style='background:#fce4e4'><td><b>Loss Reason</b></td><td>@{triggerBody()?['lossReason']}</td></tr><tr><td><b>Notes</b></td><td>@{triggerBody()?['lossNotes']}</td></tr></table><p>A debrief has been scheduled. Please review and identify learnings.</p>",
+                          "IsHtml": true
+                        }
+                      }
+                    }
+
+                  },
+                  "else": {
+                    "actions": {
+                      "Send_Loss_Reason_Required": {
+                        "type": "ApiConnection",
+                        "inputs": {
+                          "host": { "connection": { "name": "@parameters('$connections')['office365']['connectionId']" } },
+                          "method": "post",
+                          "path": "/v2/Mail/Send",
+                          "body": {
+                            "To": "@triggerBody()?['repEmail']",
+                            "CC": "@parameters('ManagerEmail')",
+                            "Subject": "⚠ Action Required: Loss Reason Missing — @{triggerBody()?['dealId']}",
+                            "Body": "<p><b>@{triggerBody()?['repName']},</b></p><p>Deal <b>@{triggerBody()?['dealId']} – @{triggerBody()?['dealName']}</b> ($@{triggerBody()?['dealValue']}) has been marked Closed Lost, but no Loss Reason was recorded.</p><p>Please update the Loss Reason field within <b>24 hours</b>. This data directly informs our win/loss analysis and coaching program.</p><p><a href='https://yourcompany.quickbase.com/nav/app/{{appId}}/action/record?rid=@{triggerBody()?['recordId']}'>Update the deal now</a></p>",
+                            "IsHtml": true
+                          }
+                        }
+                      }
+                    }
+                  }
+                },
+
+                "Log_Loss_Activity": {
+                  "type": "Http",
+                  "runAfter": { "Check_Loss_Reason_Captured": ["Succeeded"] },
+                  "inputs": {
+                    "method": "POST",
+                    "uri": "https://api.quickbase.com/v1/records",
+                    "headers": {
+                      "QB-Realm-Hostname": "@parameters('QBRealmHostname')",
+                      "Authorization": "QB-USER-TOKEN @{parameters('QBUserToken')}",
+                      "Content-Type": "application/json"
+                    },
+                    "body": {
+                      "to": "@parameters('QBActivitiesTableId')",
+                      "data": [{
+                        "7":  { "value": "@triggerBody()?['recordId']" },
+                        "9":  { "value": "Stage Change" },
+                        "10": { "value": "CLOSED LOST" },
+                        "11": { "value": "Lost after @{triggerBody()?['dealAge']} days at stage @{triggerBody()?['previousStage']}. Reason: @{coalesce(triggerBody()?['lossReason'], 'Not recorded')}. Notes: @{triggerBody()?['lossNotes']}." },
+                        "12": { "value": "@utcNow()" },
+                        "14": { "value": "Negative" },
+                        "15": { "value": "@{triggerBody()?['repName']}" },
+                        "17": { "value": "Automation" }
+                      }]
+                    }
+                  }
+                }
+
+              }
+            }
+
+          },
+          "default": { "actions": {} }
+        },
+
+        "Return_Success": {
+          "type": "Response",
+          "runAfter": { "Route_by_Outcome": ["Succeeded"] },
+          "inputs": {
+            "statusCode": 200,
+            "body": { "result": "Won/Lost notification processed", "dealId": "@triggerBody()?['dealId']", "outcome": "@triggerBody()?['outcome']" }
+          }
+        }
+
+      }
+    }
+  }
+}

@@ -1,0 +1,353 @@
+{
+  "properties": {
+    "displayName": "PROC-02 Multi-Level Approval Routing (Levels 2–4)",
+    "description": "Called after each successful approval level. Uses a Switch on the completed level and the request amount to determine if another approval level is needed or if the request is fully approved. Handles Level 2 (Dept Head), Level 3 (Finance Director), and Level 4 (CEO). Rejection at any level immediately closes the request.",
+    "state": "Started",
+    "definition": {
+      "$schema": "https://schema.management.azure.com/providers/Microsoft.Logic/schemas/2016-06-01/workflowdefinition.json#",
+      "contentVersion": "1.0.0.0",
+      "parameters": {
+        "$connections":        { "defaultValue": {}, "type": "Object" },
+        "$authentication":     { "defaultValue": {}, "type": "SecureObject" },
+        "QBRealmHostname":     { "defaultValue": "yourcompany.quickbase.com", "type": "String" },
+        "QBUserToken":         { "defaultValue": "", "type": "SecureString" },
+        "QBRequestsTableId":   { "defaultValue": "", "type": "String" },
+        "QBApprovalHistoryId": { "defaultValue": "", "type": "String" },
+        "FinalApprovalUrl":    { "defaultValue": "", "type": "String" },
+        "RejectionFlowUrl":    { "defaultValue": "", "type": "String" }
+      },
+      "triggers": {
+        "When_HTTP_Request_Received": {
+          "type": "Request",
+          "kind": "Http",
+          "inputs": {
+            "schema": {
+              "type": "object",
+              "required": ["requestRecordId", "requestNumber", "totalAmount", "completedLevel", "requestorEmail"],
+              "properties": {
+                "requestRecordId":  { "type": "integer" },
+                "requestNumber":    { "type": "string" },
+                "title":            { "type": "string" },
+                "totalAmount":      { "type": "number" },
+                "category":         { "type": "string" },
+                "vendorName":       { "type": "string" },
+                "budgetCode":       { "type": "string" },
+                "requestorName":    { "type": "string" },
+                "requestorEmail":   { "type": "string" },
+                "isUrgent":         { "type": "boolean" },
+                "completedLevel":   { "type": "integer" },
+                "approverComments": { "type": "string" },
+                "approverName":     { "type": "string" },
+                "approverEmail":    { "type": "string" },
+                "availableBudget":  { "type": "number" },
+                "budgetWarning":    { "type": "boolean" },
+                "deptHeadEmail":    { "type": "string" },
+                "financeDirectorEmail": { "type": "string" },
+                "ceoEmail":         { "type": "string" }
+              }
+            }
+          }
+        }
+      },
+      "actions": {
+
+        "Log_Previous_Approval": {
+          "type": "Http",
+          "runAfter": {},
+          "inputs": {
+            "method": "POST",
+            "uri": "https://api.quickbase.com/v1/records",
+            "headers": {
+              "QB-Realm-Hostname": "@parameters('QBRealmHostname')",
+              "Authorization": "QB-USER-TOKEN @{parameters('QBUserToken')}",
+              "Content-Type": "application/json"
+            },
+            "body": {
+              "to": "@parameters('QBApprovalHistoryId')",
+              "data": [{
+                "6":  { "value": "@triggerBody()?['requestRecordId']" },
+                "7":  { "value": "@triggerBody()?['completedLevel']" },
+                "8":  { "value": "@triggerBody()?['approverName']" },
+                "9":  { "value": "@triggerBody()?['approverEmail']" },
+                "10": { "value": "Approved" },
+                "11": { "value": "@triggerBody()?['approverComments']" },
+                "12": { "value": "@utcNow()" },
+                "15": { "value": "Email" }
+              }]
+            }
+          }
+        },
+
+        "Determine_Next_Step": {
+          "type": "Switch",
+          "runAfter": { "Log_Previous_Approval": ["Succeeded"] },
+          "expression": "@triggerBody()?['completedLevel']",
+          "cases": {
+
+            "Completed_Level_1": {
+              "case": 1,
+              "actions": {
+                "Check_Amount_Needs_L2": {
+                  "type": "Condition",
+                  "expression": { "greater": ["@triggerBody()?['totalAmount']", 75000] },
+                  "actions": {
+
+                    "Update_Status_L2_Pending": {
+                      "type": "Http",
+                      "inputs": {
+                        "method": "POST",
+                        "uri": "https://api.quickbase.com/v1/records",
+                        "headers": {
+                          "QB-Realm-Hostname": "@parameters('QBRealmHostname')",
+                          "Authorization": "QB-USER-TOKEN @{parameters('QBUserToken')}",
+                          "Content-Type": "application/json"
+                        },
+                        "body": {
+                          "to": "@parameters('QBRequestsTableId')",
+                          "data": [{ "3": { "value": "@triggerBody()?['requestRecordId']" }, "19": { "value": "Level 2 Pending" }, "21": { "value": 2 } }]
+                        }
+                      }
+                    },
+
+                    "Send_Level_2_Approval": {
+                      "type": "ApiConnectionWebhook",
+                      "runAfter": { "Update_Status_L2_Pending": ["Succeeded"] },
+                      "inputs": {
+                        "host": { "connection": { "name": "@parameters('$connections')['approvals']['connectionId']" } },
+                        "method": "post",
+                        "path": "/approvalRequestCompleted",
+                        "body": {
+                          "NotificationUrl": "@{listCallbackUrl()}",
+                          "ApprovalRequest": {
+                            "title": "Level 2 Approval: @{triggerBody()?['requestNumber']} – R@{triggerBody()?['totalAmount']}",
+                            "requestor": "@{triggerBody()?['requestorEmail']}",
+                            "approvers": [ "@{triggerBody()?['deptHeadEmail']}" ],
+                            "details": "@{concat('Request: ', triggerBody()?['requestNumber'], ' — ', triggerBody()?['title'], '\nAmount: R', string(triggerBody()?['totalAmount']), '\nCategory: ', triggerBody()?['category'], '\nVendor: ', triggerBody()?['vendorName'], '\nBudget Code: ', triggerBody()?['budgetCode'], '\nLevel 1 Manager approved. Dept Head sign-off required.', if(triggerBody()?['budgetWarning'], '\n⚠ Budget warning: request exceeds available departmental budget.', ''))}",
+                            "itemLink": "https://yourcompany.quickbase.com/nav/app/{{appId}}/action/record?rid=@{triggerBody()?['requestRecordId']}",
+                            "itemLinkDescription": "View Full Request"
+                          }
+                        }
+                      }
+                    },
+
+                    "Route_After_L2": {
+                      "type": "Condition",
+                      "runAfter": { "Send_Level_2_Approval": ["Succeeded"] },
+                      "expression": { "equals": ["@body('Send_Level_2_Approval')?['outcome']", "Approve"] },
+                      "actions": {
+                        "Re_Trigger_Routing_As_L2": {
+                          "type": "Http",
+                          "inputs": {
+                            "method": "POST",
+                            "uri": "@triggerBody()?['_self_url']",
+                            "body": {
+                              "requestRecordId":      "@triggerBody()?['requestRecordId']",
+                              "requestNumber":        "@triggerBody()?['requestNumber']",
+                              "title":               "@triggerBody()?['title']",
+                              "totalAmount":         "@triggerBody()?['totalAmount']",
+                              "category":            "@triggerBody()?['category']",
+                              "vendorName":          "@triggerBody()?['vendorName']",
+                              "budgetCode":          "@triggerBody()?['budgetCode']",
+                              "requestorName":       "@triggerBody()?['requestorName']",
+                              "requestorEmail":      "@triggerBody()?['requestorEmail']",
+                              "isUrgent":            "@triggerBody()?['isUrgent']",
+                              "completedLevel":      2,
+                              "approverComments":    "@body('Send_Level_2_Approval')?['comments']",
+                              "approverName":        "@body('Send_Level_2_Approval')?['approverName']",
+                              "approverEmail":       "@triggerBody()?['deptHeadEmail']",
+                              "availableBudget":     "@triggerBody()?['availableBudget']",
+                              "budgetWarning":       "@triggerBody()?['budgetWarning']",
+                              "financeDirectorEmail":"@triggerBody()?['financeDirectorEmail']",
+                              "ceoEmail":            "@triggerBody()?['ceoEmail']"
+                            }
+                          }
+                        }
+                      },
+                      "else": {
+                        "actions": {
+                          "Reject_at_L2": {
+                            "type": "Http",
+                            "inputs": {
+                              "method": "POST",
+                              "uri": "@parameters('RejectionFlowUrl')",
+                              "body": {
+                                "requestRecordId": "@triggerBody()?['requestRecordId']",
+                                "requestNumber":   "@triggerBody()?['requestNumber']",
+                                "requestorEmail":  "@triggerBody()?['requestorEmail']",
+                                "requestorName":   "@triggerBody()?['requestorName']",
+                                "title":          "@triggerBody()?['title']",
+                                "totalAmount":    "@triggerBody()?['totalAmount']",
+                                "rejectedBy":     "@body('Send_Level_2_Approval')?['approverName']",
+                                "rejectionLevel": 2,
+                                "rejectionReason":"@body('Send_Level_2_Approval')?['comments']"
+                              }
+                            }
+                          }
+                        }
+                      }
+                    }
+
+                  },
+                  "else": {
+                    "actions": {
+                      "Fully_Approved_After_L1": {
+                        "type": "Http",
+                        "inputs": {
+                          "method": "POST",
+                          "uri": "@parameters('FinalApprovalUrl')",
+                          "body": {
+                            "requestRecordId": "@triggerBody()?['requestRecordId']",
+                            "requestNumber":   "@triggerBody()?['requestNumber']",
+                            "title":          "@triggerBody()?['title']",
+                            "totalAmount":    "@triggerBody()?['totalAmount']",
+                            "vendorName":     "@triggerBody()?['vendorName']",
+                            "budgetCode":     "@triggerBody()?['budgetCode']",
+                            "requestorName":  "@triggerBody()?['requestorName']",
+                            "requestorEmail": "@triggerBody()?['requestorEmail']",
+                            "approvedBy":     "@triggerBody()?['approverName']",
+                            "approvalLevel":  1
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            },
+
+            "Completed_Level_2": {
+              "case": 2,
+              "actions": {
+                "Check_Amount_Needs_L3": {
+                  "type": "Condition",
+                  "expression": { "greater": ["@triggerBody()?['totalAmount']", 250000] },
+                  "actions": {
+                    "Update_Status_L3_Pending": {
+                      "type": "Http",
+                      "inputs": {
+                        "method": "POST",
+                        "uri": "https://api.quickbase.com/v1/records",
+                        "headers": { "QB-Realm-Hostname": "@parameters('QBRealmHostname')", "Authorization": "QB-USER-TOKEN @{parameters('QBUserToken')}", "Content-Type": "application/json" },
+                        "body": { "to": "@parameters('QBRequestsTableId')", "data": [{ "3": { "value": "@triggerBody()?['requestRecordId']" }, "19": { "value": "Level 3 Pending" }, "21": { "value": 3 } }] }
+                      }
+                    },
+                    "Send_Level_3_Approval": {
+                      "type": "ApiConnectionWebhook",
+                      "runAfter": { "Update_Status_L3_Pending": ["Succeeded"] },
+                      "inputs": {
+                        "host": { "connection": { "name": "@parameters('$connections')['approvals']['connectionId']" } },
+                        "method": "post",
+                        "path": "/approvalRequestCompleted",
+                        "body": {
+                          "NotificationUrl": "@{listCallbackUrl()}",
+                          "ApprovalRequest": {
+                            "title": "Finance Director Approval: @{triggerBody()?['requestNumber']} – R@{triggerBody()?['totalAmount']}",
+                            "requestor": "@{triggerBody()?['requestorEmail']}",
+                            "approvers": [ "@{triggerBody()?['financeDirectorEmail']}" ],
+                            "details": "High-value procurement request requiring Finance Director sign-off. Manager and Dept Head have approved. Amount: R@{triggerBody()?['totalAmount']}. Vendor: @{triggerBody()?['vendorName']}. Budget Code: @{triggerBody()?['budgetCode']}.",
+                            "itemLink": "https://yourcompany.quickbase.com/nav/app/{{appId}}/action/record?rid=@{triggerBody()?['requestRecordId']}"
+                          }
+                        }
+                      }
+                    },
+                    "Route_After_L3": {
+                      "type": "Condition",
+                      "runAfter": { "Send_Level_3_Approval": ["Succeeded"] },
+                      "expression": { "equals": ["@body('Send_Level_3_Approval')?['outcome']", "Approve"] },
+                      "actions": {
+                        "Check_Needs_L4": {
+                          "type": "Condition",
+                          "expression": { "greater": ["@triggerBody()?['totalAmount']", 750000] },
+                          "actions": {
+                            "Update_Status_L4_Pending": {
+                              "type": "Http",
+                              "inputs": {
+                                "method": "POST",
+                                "uri": "https://api.quickbase.com/v1/records",
+                                "headers": { "QB-Realm-Hostname": "@parameters('QBRealmHostname')", "Authorization": "QB-USER-TOKEN @{parameters('QBUserToken')}", "Content-Type": "application/json" },
+                                "body": { "to": "@parameters('QBRequestsTableId')", "data": [{ "3": { "value": "@triggerBody()?['requestRecordId']" }, "19": { "value": "Level 4 Pending" }, "21": { "value": 4 } }] }
+                              }
+                            },
+                            "Send_Level_4_CEO": {
+                              "type": "ApiConnectionWebhook",
+                              "runAfter": { "Update_Status_L4_Pending": ["Succeeded"] },
+                              "inputs": {
+                                "host": { "connection": { "name": "@parameters('$connections')['approvals']['connectionId']" } },
+                                "method": "post",
+                                "path": "/approvalRequestCompleted",
+                                "body": {
+                                  "NotificationUrl": "@{listCallbackUrl()}",
+                                  "ApprovalRequest": {
+                                    "title": "CEO Approval Required: @{triggerBody()?['requestNumber']} – R@{triggerBody()?['totalAmount']}",
+                                    "requestor": "@{triggerBody()?['requestorEmail']}",
+                                    "approvers": [ "@{triggerBody()?['ceoEmail']}" ],
+                                    "details": "Capital expenditure above R750,000 requires CEO approval. All prior levels (Manager, Dept Head, Finance Director) have approved. Amount: R@{triggerBody()?['totalAmount']}. Vendor: @{triggerBody()?['vendorName']}.",
+                                    "itemLink": "https://yourcompany.quickbase.com/nav/app/{{appId}}/action/record?rid=@{triggerBody()?['requestRecordId']}"
+                                  }
+                                }
+                              }
+                            },
+                            "Route_After_CEO": {
+                              "type": "Condition",
+                              "runAfter": { "Send_Level_4_CEO": ["Succeeded"] },
+                              "expression": { "equals": ["@body('Send_Level_4_CEO')?['outcome']", "Approve"] },
+                              "actions": {
+                                "Final_Approval_L4": {
+                                  "type": "Http",
+                                  "inputs": {
+                                    "method": "POST",
+                                    "uri": "@parameters('FinalApprovalUrl')",
+                                    "body": { "requestRecordId": "@triggerBody()?['requestRecordId']", "requestNumber": "@triggerBody()?['requestNumber']", "title": "@triggerBody()?['title']", "totalAmount": "@triggerBody()?['totalAmount']", "vendorName": "@triggerBody()?['vendorName']", "budgetCode": "@triggerBody()?['budgetCode']", "requestorName": "@triggerBody()?['requestorName']", "requestorEmail": "@triggerBody()?['requestorEmail']", "approvedBy": "@body('Send_Level_4_CEO')?['approverName']", "approvalLevel": 4 }
+                                  }
+                                }
+                              },
+                              "else": {
+                                "actions": {
+                                  "Reject_at_L4": {
+                                    "type": "Http",
+                                    "inputs": { "method": "POST", "uri": "@parameters('RejectionFlowUrl')", "body": { "requestRecordId": "@triggerBody()?['requestRecordId']", "requestNumber": "@triggerBody()?['requestNumber']", "requestorEmail": "@triggerBody()?['requestorEmail']", "requestorName": "@triggerBody()?['requestorName']", "title": "@triggerBody()?['title']", "totalAmount": "@triggerBody()?['totalAmount']", "rejectedBy": "@body('Send_Level_4_CEO')?['approverName']", "rejectionLevel": 4, "rejectionReason": "@body('Send_Level_4_CEO')?['comments']" } }
+                                  }
+                                }
+                              }
+                            }
+                          },
+                          "else": {
+                            "actions": {
+                              "Final_Approval_L3": {
+                                "type": "Http",
+                                "inputs": { "method": "POST", "uri": "@parameters('FinalApprovalUrl')", "body": { "requestRecordId": "@triggerBody()?['requestRecordId']", "requestNumber": "@triggerBody()?['requestNumber']", "title": "@triggerBody()?['title']", "totalAmount": "@triggerBody()?['totalAmount']", "vendorName": "@triggerBody()?['vendorName']", "budgetCode": "@triggerBody()?['budgetCode']", "requestorName": "@triggerBody()?['requestorName']", "requestorEmail": "@triggerBody()?['requestorEmail']", "approvedBy": "@body('Send_Level_3_Approval')?['approverName']", "approvalLevel": 3 } }
+                              }
+                            }
+                          }
+                        }
+                      },
+                      "else": {
+                        "actions": {
+                          "Reject_at_L3": {
+                            "type": "Http",
+                            "inputs": { "method": "POST", "uri": "@parameters('RejectionFlowUrl')", "body": { "requestRecordId": "@triggerBody()?['requestRecordId']", "requestNumber": "@triggerBody()?['requestNumber']", "requestorEmail": "@triggerBody()?['requestorEmail']", "requestorName": "@triggerBody()?['requestorName']", "title": "@triggerBody()?['title']", "totalAmount": "@triggerBody()?['totalAmount']", "rejectedBy": "@body('Send_Level_3_Approval')?['approverName']", "rejectionLevel": 3, "rejectionReason": "@body('Send_Level_3_Approval')?['comments']" } }
+                          }
+                        }
+                      }
+                    }
+                  },
+                  "else": {
+                    "actions": {
+                      "Final_Approval_L2": {
+                        "type": "Http",
+                        "inputs": { "method": "POST", "uri": "@parameters('FinalApprovalUrl')", "body": { "requestRecordId": "@triggerBody()?['requestRecordId']", "requestNumber": "@triggerBody()?['requestNumber']", "title": "@triggerBody()?['title']", "totalAmount": "@triggerBody()?['totalAmount']", "vendorName": "@triggerBody()?['vendorName']", "budgetCode": "@triggerBody()?['budgetCode']", "requestorName": "@triggerBody()?['requestorName']", "requestorEmail": "@triggerBody()?['requestorEmail']", "approvedBy": "@triggerBody()?['approverName']", "approvalLevel": 2 } }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+
+          },
+          "default": { "actions": {} }
+        }
+
+      }
+    }
+  }
+}

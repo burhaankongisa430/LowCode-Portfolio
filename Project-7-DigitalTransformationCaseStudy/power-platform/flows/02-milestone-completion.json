@@ -1,0 +1,125 @@
+{
+  "properties": {
+    "displayName": "DT-02 Milestone Completion — Celebrate & Advance",
+    "description": "Triggered when a transformation milestone is marked complete. Sends a congratulation to the initiative owner and team, checks if the initiative is now 100% complete, and posts a progress update to the exec Teams channel.",
+    "state": "Started",
+    "definition": {
+      "$schema": "https://schema.management.azure.com/providers/Microsoft.Logic/schemas/2016-06-01/workflowdefinition.json#",
+      "contentVersion": "1.0.0.0",
+      "parameters": {
+        "$connections":    { "defaultValue": {}, "type": "Object" },
+        "$authentication": { "defaultValue": {}, "type": "SecureObject" },
+        "TeamsWebhookUrl": { "defaultValue": "", "type": "String" }
+      },
+      "triggers": {
+        "When_HTTP_Request_Received": {
+          "type": "Request",
+          "kind": "Http",
+          "inputs": {
+            "schema": {
+              "type": "object",
+              "required": ["milestoneName", "initiativeName", "ownerEmail", "completionPct"],
+              "properties": {
+                "milestoneId":       { "type": "string" },
+                "milestoneName":     { "type": "string" },
+                "initiativeName":    { "type": "string" },
+                "initiativeId":      { "type": "string" },
+                "ownerName":         { "type": "string" },
+                "ownerEmail":        { "type": "string" },
+                "completionPct":     { "type": "number" },
+                "totalMilestones":   { "type": "integer" },
+                "completedCount":    { "type": "integer" },
+                "isLastMilestone":   { "type": "boolean" },
+                "scheduleStatus":    { "type": "string" }
+              }
+            }
+          }
+        }
+      },
+      "actions": {
+
+        "Notify_Owner_Milestone_Done": {
+          "type": "ApiConnection",
+          "runAfter": {},
+          "inputs": {
+            "host": { "connection": { "name": "@parameters('$connections')['office365']['connectionId']" } },
+            "method": "post",
+            "path": "/v2/Mail/Send",
+            "body": {
+              "To": "@triggerBody()?['ownerEmail']",
+              "Subject": "✅ Milestone Complete: @{triggerBody()?['milestoneName']} — @{triggerBody()?['initiativeName']} (@{triggerBody()?['completionPct']}%)",
+              "Body": "<p>Hi @{triggerBody()?['ownerName']},</p><p>Milestone <b>@{triggerBody()?['milestoneName']}</b> has been marked complete on the <b>@{triggerBody()?['initiativeName']}</b> initiative.</p><p><b>Overall progress: @{triggerBody()?['completionPct']}%</b> (@{triggerBody()?['completedCount']}/@{triggerBody()?['totalMilestones']} milestones)</p><p>Schedule status: @{triggerBody()?['scheduleStatus']}</p>",
+              "IsHtml": true
+            }
+          }
+        },
+
+        "Is_Initiative_Complete": {
+          "type": "Condition",
+          "runAfter": { "Notify_Owner_Milestone_Done": ["Succeeded"] },
+          "expression": { "equals": ["@triggerBody()?['isLastMilestone']", true] },
+          "actions": {
+            "Post_Initiative_Complete_to_Teams": {
+              "type": "Http",
+              "inputs": {
+                "method": "POST",
+                "uri": "@parameters('TeamsWebhookUrl')",
+                "body": {
+                  "type": "message",
+                  "attachments": [{
+                    "contentType": "application/vnd.microsoft.card.adaptive",
+                    "content": {
+                      "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
+                      "type": "AdaptiveCard",
+                      "version": "1.4",
+                      "body": [
+                        { "type": "Container", "style": "good", "items": [
+                          { "type": "TextBlock", "text": "🏆 Initiative Complete!", "weight": "Bolder", "size": "ExtraLarge", "color": "Good" }
+                        ]},
+                        { "type": "TextBlock", "text": "@{triggerBody()?['initiativeName']}", "wrap": true, "weight": "Bolder", "size": "Large" },
+                        { "type": "FactSet", "facts": [
+                          { "title": "Owner",           "value": "@{triggerBody()?['ownerName']}" },
+                          { "title": "Milestones",      "value": "@{triggerBody()?['totalMilestones']}/@{triggerBody()?['totalMilestones']} complete" },
+                          { "title": "Schedule Status", "value": "@{triggerBody()?['scheduleStatus']}" }
+                        ]},
+                        { "type": "TextBlock", "text": "Congratulations to the entire team! 🎉", "wrap": true, "isSubtle": true }
+                      ]
+                    }
+                  }]
+                }
+              }
+            }
+          },
+          "else": {
+            "actions": {
+              "Post_Milestone_Progress_to_Teams": {
+                "type": "Http",
+                "inputs": {
+                  "method": "POST",
+                  "uri": "@parameters('TeamsWebhookUrl')",
+                  "body": {
+                    "type": "message",
+                    "attachments": [{
+                      "contentType": "application/vnd.microsoft.card.adaptive",
+                      "content": {
+                        "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
+                        "type": "AdaptiveCard",
+                        "version": "1.4",
+                        "body": [
+                          { "type": "TextBlock", "text": "✅ Milestone Complete", "weight": "Bolder", "size": "Medium", "color": "Good" },
+                          { "type": "TextBlock", "text": "@{triggerBody()?['milestoneName']}", "wrap": true, "weight": "Bolder" },
+                          { "type": "TextBlock", "text": "Initiative: **@{triggerBody()?['initiativeName']}** — @{triggerBody()?['completionPct']}% overall progress", "wrap": true }
+                        ]
+                      }
+                    }]
+                  }
+                }
+              }
+            }
+          }
+        }
+
+      }
+    }
+  }
+}

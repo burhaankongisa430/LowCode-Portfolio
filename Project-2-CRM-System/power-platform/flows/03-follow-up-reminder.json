@@ -1,0 +1,229 @@
+{
+  "properties": {
+    "displayName": "CRM-03 Daily Follow-up Reminders",
+    "description": "Runs every morning at 07:30 SAST. Queries all open deals with overdue or due-today follow-ups, groups them by sales rep, and sends each rep a personalised digest. Also surfaces stalled deals (no activity > 14 days) to the manager.",
+    "state": "Started",
+    "definition": {
+      "$schema": "https://schema.management.azure.com/providers/Microsoft.Logic/schemas/2016-06-01/workflowdefinition.json#",
+      "contentVersion": "1.0.0.0",
+      "parameters": {
+        "$connections": { "defaultValue": {}, "type": "Object" },
+        "$authentication": { "defaultValue": {}, "type": "SecureObject" },
+        "QBRealmHostname":  { "defaultValue": "yourcompany.quickbase.com", "type": "String" },
+        "QBUserToken":      { "defaultValue": "", "type": "SecureString" },
+        "QBDealsTableId":   { "defaultValue": "", "type": "String" },
+        "QBRepsTableId":    { "defaultValue": "", "type": "String" },
+        "ManagerEmail":     { "defaultValue": "sales-manager@yourcompany.com", "type": "String" }
+      },
+      "triggers": {
+        "Recurrence_Daily_0730": {
+          "type": "Recurrence",
+          "recurrence": {
+            "frequency": "Day",
+            "interval": 1,
+            "schedule": { "hours": ["7"], "minutes": [30] },
+            "timeZone": "South Africa Standard Time"
+          }
+        }
+      },
+      "actions": {
+
+        "Get_Active_Reps": {
+          "type": "Http",
+          "runAfter": {},
+          "inputs": {
+            "method": "POST",
+            "uri": "https://api.quickbase.com/v1/records/query",
+            "headers": {
+              "QB-Realm-Hostname": "@parameters('QBRealmHostname')",
+              "Authorization": "QB-USER-TOKEN @{parameters('QBUserToken')}",
+              "Content-Type": "application/json"
+            },
+            "body": {
+              "from": "@parameters('QBRepsTableId')",
+              "select": [3, 6, 7],
+              "where": "{11.EX.'true'}",
+              "options": { "top": 100 }
+            }
+          }
+        },
+
+        "Parse_Reps": {
+          "type": "ParseJson",
+          "runAfter": { "Get_Active_Reps": ["Succeeded"] },
+          "inputs": {
+            "content": "@body('Get_Active_Reps')",
+            "schema": {
+              "type": "object",
+              "properties": {
+                "data": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "3": { "type": "object", "properties": { "value": { "type": "integer" } } },
+                      "6": { "type": "object", "properties": { "value": { "type": "string" } } },
+                      "7": { "type": "object", "properties": { "value": { "type": "string" } } }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+
+        "Initialize_Stalled_Count": {
+          "type": "InitializeVariable",
+          "runAfter": { "Parse_Reps": ["Succeeded"] },
+          "inputs": {
+            "variables": [
+              { "name": "TotalStalledDeals", "type": "integer", "value": 0 },
+              { "name": "TotalOverdueFollowups", "type": "integer", "value": 0 }
+            ]
+          }
+        },
+
+        "For_Each_Rep": {
+          "type": "Foreach",
+          "runAfter": { "Initialize_Stalled_Count": ["Succeeded"] },
+          "foreach": "@body('Parse_Reps')?['data']",
+          "actions": {
+
+            "Get_Rep_Overdue_Deals": {
+              "type": "Http",
+              "inputs": {
+                "method": "POST",
+                "uri": "https://api.quickbase.com/v1/records/query",
+                "headers": {
+                  "QB-Realm-Hostname": "@parameters('QBRealmHostname')",
+                  "Authorization": "QB-USER-TOKEN @{parameters('QBUserToken')}",
+                  "Content-Type": "application/json"
+                },
+                "body": {
+                  "from": "@parameters('QBDealsTableId')",
+                  "select": [3, 6, 7, 9, 11, 12, 14, 21, 23, 25, 27, 31, 32],
+                  "where": "@concat('{10.EX.', string(items('For_Each_Rep')?['3']?['value']), '} AND {11.XEX.\"Closed Won\"} AND {11.XEX.\"Closed Lost\"} AND ({25.EX.\"Overdue\"} OR {25.EX.\"Due Today\"} OR {32.EX.\"Stalled\"})')",
+                  "sortBy": [
+                    { "fieldId": 25, "order": "ASC" },
+                    { "fieldId": 27, "order": "ASC" }
+                  ]
+                }
+              }
+            },
+
+            "Parse_Rep_Deals": {
+              "type": "ParseJson",
+              "runAfter": { "Get_Rep_Overdue_Deals": ["Succeeded"] },
+              "inputs": {
+                "content": "@body('Get_Rep_Overdue_Deals')",
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "data": { "type": "array" },
+                    "metadata": { "type": "object", "properties": { "numRecords": { "type": "integer" } } }
+                  }
+                }
+              }
+            },
+
+            "Rep_Has_Actions": {
+              "type": "Condition",
+              "runAfter": { "Parse_Rep_Deals": ["Succeeded"] },
+              "expression": { "greater": ["@body('Parse_Rep_Deals')?['metadata']?['numRecords']", 0] },
+              "actions": {
+
+                "Increment_Stalled_Count": {
+                  "type": "IncrementVariable",
+                  "inputs": { "name": "TotalStalledDeals", "value": "@body('Parse_Rep_Deals')?['metadata']?['numRecords']" }
+                },
+
+                "Build_Rep_Email_Rows": {
+                  "type": "Compose",
+                  "runAfter": { "Increment_Stalled_Count": ["Succeeded"] },
+                  "inputs": "@join(items('For_Each_Rep')?['data'], '')"
+                },
+
+                "Send_Rep_Follow_up_Digest": {
+                  "type": "ApiConnection",
+                  "runAfter": { "Build_Rep_Email_Rows": ["Succeeded"] },
+                  "inputs": {
+                    "host": { "connection": { "name": "@parameters('$connections')['office365']['connectionId']" } },
+                    "method": "post",
+                    "path": "/v2/Mail/Send",
+                    "body": {
+                      "To": "@items('For_Each_Rep')?['7']?['value']",
+                      "Subject": "📋 Your Follow-up Digest — @{formatDateTime(utcNow(), 'ddd d MMM yyyy')}",
+                      "Body": "<p>Hi @{items('For_Each_Rep')?['6']?['value']},</p><p>You have <b>@{body('Parse_Rep_Deals')?['metadata']?['numRecords']}</b> deal(s) needing attention today.</p><table style='width:100%;border-collapse:collapse'><thead><tr style='background:#2C3E50;color:#fff'><th style='padding:8px;text-align:left'>Deal</th><th style='padding:8px'>Stage</th><th style='padding:8px'>Value</th><th style='padding:8px'>Follow-up</th><th style='padding:8px'>Health</th></tr></thead><tbody>@{body('Parse_Rep_Deals')?['data']}</tbody></table><p>Log in to update your pipeline: <a href='https://yourcompany.quickbase.com'>Open CRM</a></p>",
+                      "IsHtml": true
+                    }
+                  }
+                }
+
+              },
+              "else": { "actions": {} }
+            }
+
+          }
+        },
+
+        "Get_All_Stalled_for_Manager": {
+          "type": "Http",
+          "runAfter": { "For_Each_Rep": ["Succeeded"] },
+          "inputs": {
+            "method": "POST",
+            "uri": "https://api.quickbase.com/v1/records/query",
+            "headers": {
+              "QB-Realm-Hostname": "@parameters('QBRealmHostname')",
+              "Authorization": "QB-USER-TOKEN @{parameters('QBUserToken')}",
+              "Content-Type": "application/json"
+            },
+            "body": {
+              "from": "@parameters('QBDealsTableId')",
+              "select": [3, 6, 7, 9, 10, 11, 12, 23, 32],
+              "where": "{32.EX.'Stalled'} AND {11.XEX.'Closed Won'} AND {11.XEX.'Closed Lost'}",
+              "sortBy": [{ "fieldId": 23, "order": "DESC" }]
+            }
+          }
+        },
+
+        "Parse_Manager_Stalled": {
+          "type": "ParseJson",
+          "runAfter": { "Get_All_Stalled_for_Manager": ["Succeeded"] },
+          "inputs": {
+            "content": "@body('Get_All_Stalled_for_Manager')",
+            "schema": {
+              "type": "object",
+              "properties": {
+                "metadata": { "type": "object", "properties": { "numRecords": { "type": "integer" } } }
+              }
+            }
+          }
+        },
+
+        "Send_Manager_Stalled_Report": {
+          "type": "Condition",
+          "runAfter": { "Parse_Manager_Stalled": ["Succeeded"] },
+          "expression": { "greater": ["@body('Parse_Manager_Stalled')?['metadata']?['numRecords']", 0] },
+          "actions": {
+            "Email_Manager_Stalled_Summary": {
+              "type": "ApiConnection",
+              "inputs": {
+                "host": { "connection": { "name": "@parameters('$connections')['office365']['connectionId']" } },
+                "method": "post",
+                "path": "/v2/Mail/Send",
+                "body": {
+                  "To": "@parameters('ManagerEmail')",
+                  "Subject": "⚠ @{body('Parse_Manager_Stalled')?['metadata']?['numRecords']} Stalled Deals — @{formatDateTime(utcNow(), 'ddd d MMM yyyy')}",
+                  "Body": "<p>The following deals have had no activity for more than 14 days and require your attention.</p><p><b>@{body('Parse_Manager_Stalled')?['metadata']?['numRecords']} stalled deal(s) found.</b></p><p><a href='https://yourcompany.quickbase.com'>View in CRM</a></p>",
+                  "IsHtml": true
+                }
+              }
+            }
+          },
+          "else": { "actions": {} }
+        }
+
+      }
+    }
+  }
+}

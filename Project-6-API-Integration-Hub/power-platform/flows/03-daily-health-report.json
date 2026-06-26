@@ -1,0 +1,119 @@
+{
+  "properties": {
+    "displayName": "HUB-03 Daily Integration Health Report",
+    "description": "Runs every morning at 07:00. Queries the Quickbase Integration Health table for yesterday's aggregated data and emails a status report to the ops team. Highlights any degraded or down routes.",
+    "state": "Started",
+    "definition": {
+      "$schema": "https://schema.management.azure.com/providers/Microsoft.Logic/schemas/2016-06-01/workflowdefinition.json#",
+      "contentVersion": "1.0.0.0",
+      "parameters": {
+        "$connections":      { "defaultValue": {}, "type": "Object" },
+        "$authentication":   { "defaultValue": {}, "type": "SecureObject" },
+        "QBRealmHostname":   { "defaultValue": "yourcompany.quickbase.com", "type": "String" },
+        "QBUserToken":       { "defaultValue": "", "type": "SecureString" },
+        "QBHealthTableId":   { "defaultValue": "", "type": "String" },
+        "QBDLQTableId":      { "defaultValue": "", "type": "String" },
+        "OpsEmail":          { "defaultValue": "integration-ops@yourcompany.com", "type": "String" }
+      },
+      "triggers": {
+        "Daily_0700": {
+          "type": "Recurrence",
+          "recurrence": {
+            "frequency": "Day",
+            "interval": 1,
+            "schedule": { "hours": ["7"], "minutes": [0] },
+            "timeZone": "South Africa Standard Time"
+          }
+        }
+      },
+      "actions": {
+
+        "Get_Yesterdays_Health": {
+          "type": "Http",
+          "runAfter": {},
+          "inputs": {
+            "method": "POST",
+            "uri": "https://api.quickbase.com/v1/records/query",
+            "headers": {
+              "QB-Realm-Hostname": "@parameters('QBRealmHostname')",
+              "Authorization": "QB-USER-TOKEN @{parameters('QBUserToken')}",
+              "Content-Type": "application/json"
+            },
+            "body": {
+              "from": "@parameters('QBHealthTableId')",
+              "select": [3, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15],
+              "where": "@concat('{7.EQ.\"', formatDateTime(addDays(utcNow(), -1), 'yyyy-MM-dd'), '\"}' )",
+              "sortBy": [{ "fieldId": 13, "order": "ASC" }]
+            }
+          }
+        },
+
+        "Parse_Health": {
+          "type": "ParseJson",
+          "runAfter": { "Get_Yesterdays_Health": ["Succeeded"] },
+          "inputs": {
+            "content": "@body('Get_Yesterdays_Health')",
+            "schema": {
+              "type": "object",
+              "properties": {
+                "data": { "type": "array" },
+                "metadata": { "type": "object", "properties": { "numRecords": { "type": "integer" } } }
+              }
+            }
+          }
+        },
+
+        "Get_Open_DLQ_Count": {
+          "type": "Http",
+          "runAfter": { "Parse_Health": ["Succeeded"] },
+          "inputs": {
+            "method": "POST",
+            "uri": "https://api.quickbase.com/v1/records/query",
+            "headers": {
+              "QB-Realm-Hostname": "@parameters('QBRealmHostname')",
+              "Authorization": "QB-USER-TOKEN @{parameters('QBUserToken')}",
+              "Content-Type": "application/json"
+            },
+            "body": {
+              "from": "@parameters('QBDLQTableId')",
+              "select": [3],
+              "where": "{15.EX.'Pending'}",
+              "options": { "top": 1 }
+            }
+          }
+        },
+
+        "Parse_DLQ_Count": {
+          "type": "ParseJson",
+          "runAfter": { "Get_Open_DLQ_Count": ["Succeeded"] },
+          "inputs": {
+            "content": "@body('Get_Open_DLQ_Count')",
+            "schema": {
+              "type": "object",
+              "properties": {
+                "metadata": { "type": "object", "properties": { "numRecords": { "type": "integer" } } }
+              }
+            }
+          }
+        },
+
+        "Send_Health_Report": {
+          "type": "ApiConnection",
+          "runAfter": { "Parse_DLQ_Count": ["Succeeded"] },
+          "inputs": {
+            "host": { "connection": { "name": "@parameters('$connections')['office365']['connectionId']" } },
+            "method": "post",
+            "path": "/v2/Mail/Send",
+            "body": {
+              "To": "@parameters('OpsEmail')",
+              "Subject": "📊 Integration Health Report — @{formatDateTime(addDays(utcNow(), -1), 'ddd d MMM yyyy')}",
+              "Body": "<h2>Integration Hub — Daily Health Report</h2><p><b>Date:</b> @{formatDateTime(addDays(utcNow(), -1), 'dddd, d MMMM yyyy')}</p><p><b>Open DLQ Items:</b> @{body('Parse_DLQ_Count')?['metadata']?['numRecords']}</p><p><b>Systems Reporting:</b> @{body('Parse_Health')?['metadata']?['numRecords']}</p><table style='border-collapse:collapse;width:100%'><thead><tr style='background:#2C3E50;color:#fff'><th style='padding:8px;text-align:left'>System</th><th style='padding:8px'>Total</th><th style='padding:8px'>Success</th><th style='padding:8px'>Failed</th><th style='padding:8px'>DLQ</th><th style='padding:8px'>Success Rate</th><th style='padding:8px'>Status</th></tr></thead><tbody>@{body('Parse_Health')?['data']}</tbody></table><p><a href='https://yourcompany.quickbase.com'>View Full Event Log</a></p>",
+              "IsHtml": true
+            }
+          }
+        }
+
+      }
+    }
+  }
+}

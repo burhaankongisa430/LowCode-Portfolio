@@ -1,0 +1,313 @@
+{
+  "properties": {
+    "displayName": "CRM-01 New Lead Intake & Assignment",
+    "description": "Receives new leads from the website form webhook or external marketing tools. Validates the payload, creates a Contact and Deal in Quickbase, assigns to the next available sales rep, sends a welcome Teams card, and triggers lead scoring.",
+    "state": "Started",
+    "definition": {
+      "$schema": "https://schema.management.azure.com/providers/Microsoft.Logic/schemas/2016-06-01/workflowdefinition.json#",
+      "contentVersion": "1.0.0.0",
+      "parameters": {
+        "$connections": { "defaultValue": {}, "type": "Object" },
+        "$authentication": { "defaultValue": {}, "type": "SecureObject" },
+        "QBRealmHostname":      { "defaultValue": "yourcompany.quickbase.com", "type": "String" },
+        "QBUserToken":          { "defaultValue": "", "type": "SecureString" },
+        "QBContactsTableId":    { "defaultValue": "", "type": "String" },
+        "QBCompaniesTableId":   { "defaultValue": "", "type": "String" },
+        "QBDealsTableId":       { "defaultValue": "", "type": "String" },
+        "QBActivitiesTableId":  { "defaultValue": "", "type": "String" },
+        "QBRepsTableId":        { "defaultValue": "", "type": "String" },
+        "LeadScorerApiUrl":     { "defaultValue": "", "type": "String" },
+        "TeamsWebhookUrl":      { "defaultValue": "", "type": "String" }
+      },
+      "triggers": {
+        "When_HTTP_Request_Received": {
+          "type": "Request",
+          "kind": "Http",
+          "inputs": {
+            "schema": {
+              "type": "object",
+              "required": ["firstName", "lastName", "email", "leadSource"],
+              "properties": {
+                "firstName":    { "type": "string" },
+                "lastName":     { "type": "string" },
+                "email":        { "type": "string" },
+                "phone":        { "type": "string" },
+                "jobTitle":     { "type": "string" },
+                "companyName":  { "type": "string" },
+                "industry":     { "type": "string" },
+                "companySize":  { "type": "string" },
+                "leadSource":   { "type": "string" },
+                "dealValue":    { "type": "number" },
+                "notes":        { "type": "string" },
+                "tags":         { "type": "string" }
+              }
+            }
+          }
+        }
+      },
+      "actions": {
+
+        "Score_Lead": {
+          "type": "Http",
+          "runAfter": {},
+          "inputs": {
+            "method": "POST",
+            "uri": "@parameters('LeadScorerApiUrl')",
+            "headers": { "Content-Type": "application/json" },
+            "body": {
+              "leadSource":   "@triggerBody()?['leadSource']",
+              "jobTitle":     "@triggerBody()?['jobTitle']",
+              "companySize":  "@triggerBody()?['companySize']",
+              "industry":     "@triggerBody()?['industry']",
+              "dealValue":    "@triggerBody()?['dealValue']",
+              "email":        "@triggerBody()?['email']"
+            }
+          }
+        },
+
+        "Parse_Score_Response": {
+          "type": "ParseJson",
+          "runAfter": { "Score_Lead": ["Succeeded", "Failed"] },
+          "inputs": {
+            "content": "@if(equals(outputs('Score_Lead')['statusCode'], 200), body('Score_Lead'), json('{\"score\": 10, \"grade\": \"D – Cold\"}'))",
+            "schema": {
+              "type": "object",
+              "properties": {
+                "score": { "type": "number" },
+                "grade": { "type": "string" }
+              }
+            }
+          }
+        },
+
+        "Find_Next_Available_Rep": {
+          "type": "Http",
+          "runAfter": { "Parse_Score_Response": ["Succeeded"] },
+          "inputs": {
+            "method": "POST",
+            "uri": "https://api.quickbase.com/v1/records/query",
+            "headers": {
+              "QB-Realm-Hostname": "@parameters('QBRealmHostname')",
+              "Authorization": "QB-USER-TOKEN @{parameters('QBUserToken')}",
+              "Content-Type": "application/json"
+            },
+            "body": {
+              "from": "@parameters('QBRepsTableId')",
+              "select": [3, 6, 7, 8, 12],
+              "where": "{11.EX.'true'}",
+              "sortBy": [{ "fieldId": 12, "order": "ASC" }],
+              "options": { "top": 1 }
+            }
+          }
+        },
+
+        "Parse_Rep_Response": {
+          "type": "ParseJson",
+          "runAfter": { "Find_Next_Available_Rep": ["Succeeded"] },
+          "inputs": {
+            "content": "@body('Find_Next_Available_Rep')",
+            "schema": {
+              "type": "object",
+              "properties": {
+                "data": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "3": { "type": "object", "properties": { "value": { "type": "integer" } } },
+                      "6": { "type": "object", "properties": { "value": { "type": "string" } } },
+                      "7": { "type": "object", "properties": { "value": { "type": "string" } } }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+
+        "Create_Contact_in_QB": {
+          "type": "Http",
+          "runAfter": { "Parse_Rep_Response": ["Succeeded"] },
+          "inputs": {
+            "method": "POST",
+            "uri": "https://api.quickbase.com/v1/records",
+            "headers": {
+              "QB-Realm-Hostname": "@parameters('QBRealmHostname')",
+              "Authorization": "QB-USER-TOKEN @{parameters('QBUserToken')}",
+              "Content-Type": "application/json"
+            },
+            "body": {
+              "to": "@parameters('QBContactsTableId')",
+              "data": [{
+                "7":  { "value": "@triggerBody()?['firstName']" },
+                "8":  { "value": "@triggerBody()?['lastName']" },
+                "10": { "value": "@triggerBody()?['email']" },
+                "11": { "value": "@triggerBody()?['phone']" },
+                "12": { "value": "@triggerBody()?['jobTitle']" },
+                "15": { "value": "Lead" },
+                "16": { "value": "@triggerBody()?['leadSource']" },
+                "17": { "value": "@body('Parse_Score_Response')?['score']" },
+                "19": { "value": "@body('Parse_Rep_Response')?['data'][0]['3']['value']" },
+                "25": { "value": "@triggerBody()?['notes']" }
+              }],
+              "fieldsToReturn": [3, 6, 9]
+            }
+          }
+        },
+
+        "Parse_Contact_Response": {
+          "type": "ParseJson",
+          "runAfter": { "Create_Contact_in_QB": ["Succeeded"] },
+          "inputs": {
+            "content": "@body('Create_Contact_in_QB')",
+            "schema": {
+              "type": "object",
+              "properties": {
+                "data": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "3": { "type": "object", "properties": { "value": { "type": "integer" } } },
+                      "6": { "type": "object", "properties": { "value": { "type": "string" } } }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+
+        "Create_Deal_in_QB": {
+          "type": "Http",
+          "runAfter": { "Parse_Contact_Response": ["Succeeded"] },
+          "inputs": {
+            "method": "POST",
+            "uri": "https://api.quickbase.com/v1/records",
+            "headers": {
+              "QB-Realm-Hostname": "@parameters('QBRealmHostname')",
+              "Authorization": "QB-USER-TOKEN @{parameters('QBUserToken')}",
+              "Content-Type": "application/json"
+            },
+            "body": {
+              "to": "@parameters('QBDealsTableId')",
+              "data": [{
+                "7":  { "value": "@{triggerBody()?['firstName']} @{triggerBody()?['lastName']} – @{triggerBody()?['companyName']}" },
+                "8":  { "value": "@body('Parse_Contact_Response')?['data'][0]['3']['value']" },
+                "10": { "value": "@body('Parse_Rep_Response')?['data'][0]['3']['value']" },
+                "11": { "value": "New Lead" },
+                "12": { "value": "@coalesce(triggerBody()?['dealValue'], 0)" },
+                "15": { "value": "@addDays(utcNow(), 30, 'yyyy-MM-dd')" },
+                "17": { "value": "@triggerBody()?['leadSource']" },
+                "38": { "value": "@if(greaterOrEquals(body('Parse_Score_Response')?['score'], 75), 'High', if(greaterOrEquals(body('Parse_Score_Response')?['score'], 40), 'Medium', 'Low'))" }
+              }],
+              "fieldsToReturn": [3, 6]
+            }
+          }
+        },
+
+        "Parse_Deal_Response": {
+          "type": "ParseJson",
+          "runAfter": { "Create_Deal_in_QB": ["Succeeded"] },
+          "inputs": {
+            "content": "@body('Create_Deal_in_QB')",
+            "schema": {
+              "type": "object",
+              "properties": {
+                "data": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "3": { "type": "object", "properties": { "value": { "type": "integer" } } },
+                      "6": { "type": "object", "properties": { "value": { "type": "string" } } }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+
+        "Log_Intake_Activity": {
+          "type": "Http",
+          "runAfter": { "Parse_Deal_Response": ["Succeeded"] },
+          "inputs": {
+            "method": "POST",
+            "uri": "https://api.quickbase.com/v1/records",
+            "headers": {
+              "QB-Realm-Hostname": "@parameters('QBRealmHostname')",
+              "Authorization": "QB-USER-TOKEN @{parameters('QBUserToken')}",
+              "Content-Type": "application/json"
+            },
+            "body": {
+              "to": "@parameters('QBActivitiesTableId')",
+              "data": [{
+                "7":  { "value": "@body('Parse_Deal_Response')?['data'][0]['3']['value']" },
+                "8":  { "value": "@body('Parse_Contact_Response')?['data'][0]['3']['value']" },
+                "9":  { "value": "Note" },
+                "10": { "value": "Lead created via @{triggerBody()?['leadSource']}" },
+                "11": { "value": "Lead score: @{body('Parse_Score_Response')?['score']} (@{body('Parse_Score_Response')?['grade']}). Assigned to @{body('Parse_Rep_Response')?['data'][0]['6']['value']}." },
+                "12": { "value": "@utcNow()" },
+                "15": { "value": "System" },
+                "17": { "value": "Automation" }
+              }]
+            }
+          }
+        },
+
+        "Post_Teams_New_Lead_Card": {
+          "type": "Http",
+          "runAfter": { "Log_Intake_Activity": ["Succeeded"] },
+          "inputs": {
+            "method": "POST",
+            "uri": "@parameters('TeamsWebhookUrl')",
+            "headers": { "Content-Type": "application/json" },
+            "body": {
+              "type": "message",
+              "attachments": [{
+                "contentType": "application/vnd.microsoft.card.adaptive",
+                "content": {
+                  "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
+                  "type": "AdaptiveCard",
+                  "version": "1.4",
+                  "body": [
+                    { "type": "TextBlock", "text": "🎯 New Lead Assigned", "weight": "Bolder", "size": "Medium", "color": "Accent" },
+                    { "type": "TextBlock", "text": "@{triggerBody()?['firstName']} @{triggerBody()?['lastName']} — @{triggerBody()?['companyName']}", "wrap": true, "weight": "Bolder" },
+                    {
+                      "type": "FactSet",
+                      "facts": [
+                        { "title": "Deal ID",     "value": "@{body('Parse_Deal_Response')?['data'][0]['6']['value']}" },
+                        { "title": "Lead Score",  "value": "@{body('Parse_Score_Response')?['score']} – @{body('Parse_Score_Response')?['grade']}" },
+                        { "title": "Source",      "value": "@{triggerBody()?['leadSource']}" },
+                        { "title": "Deal Value",  "value": "$@{triggerBody()?['dealValue']}" },
+                        { "title": "Assigned To", "value": "@{body('Parse_Rep_Response')?['data'][0]['6']['value']}" }
+                      ]
+                    }
+                  ],
+                  "actions": [{ "type": "Action.OpenUrl", "title": "View Deal", "url": "https://yourcompany.quickbase.com/nav/app/{{appId}}/action/record?rid=@{body('Parse_Deal_Response')?['data'][0]['3']['value']}" }]
+                }
+              }]
+            }
+          }
+        },
+
+        "Return_Success": {
+          "type": "Response",
+          "runAfter": { "Post_Teams_New_Lead_Card": ["Succeeded", "Failed"] },
+          "inputs": {
+            "statusCode": 201,
+            "body": {
+              "contactId": "@body('Parse_Contact_Response')?['data'][0]['6']['value']",
+              "dealId":    "@body('Parse_Deal_Response')?['data'][0]['6']['value']",
+              "leadScore": "@body('Parse_Score_Response')?['score']",
+              "assignedTo":"@body('Parse_Rep_Response')?['data'][0]['6']['value']",
+              "message":   "Lead created and assigned successfully."
+            }
+          }
+        }
+
+      }
+    }
+  }
+}

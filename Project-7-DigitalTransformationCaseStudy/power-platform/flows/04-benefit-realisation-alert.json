@@ -1,0 +1,98 @@
+﻿{
+  "properties": {
+    "displayName": "DT-04 Benefit Realization Alert",
+    "description": "Triggered when an initiative's benefit realization drops below the 85% target threshold. Notifies the transformation lead and initiative owner with a gap analysis and recommended actions.",
+    "state": "Started",
+    "definition": {
+      "$schema": "https://schema.management.azure.com/providers/Microsoft.Logic/schemas/2016-06-01/workflowdefinition.json#",
+      "contentVersion": "1.0.0.0",
+      "parameters": {
+        "$connections":        { "defaultValue": {}, "type": "Object" },
+        "$authentication":     { "defaultValue": {}, "type": "SecureObject" },
+        "TransformLeadEmail":  { "defaultValue": "transformation-lead@yourcompany.com", "type": "String" },
+        "TeamsWebhookUrl":     { "defaultValue": "", "type": "String" }
+      },
+      "triggers": {
+        "When_HTTP_Request_Received": {
+          "type": "Request",
+          "kind": "Http",
+          "inputs": {
+            "schema": {
+              "type": "object",
+              "required": ["initiativeName", "benefitRealizationPct", "ownerEmail"],
+              "properties": {
+                "initiativeId":          { "type": "string" },
+                "initiativeName":        { "type": "string" },
+                "ownerName":             { "type": "string" },
+                "ownerEmail":            { "type": "string" },
+                "benefitRealizationPct": { "type": "number" },
+                "projectedBenefitsYTD":  { "type": "number" },
+                "actualBenefitsYTD":     { "type": "number" },
+                "gapAmount":             { "type": "number" },
+                "realizationStatus":     { "type": "string" },
+                "topUnderachievingMetric":{ "type": "string" }
+              }
+            }
+          }
+        }
+      },
+      "actions": {
+
+        "Set_Alert_Severity": {
+          "type": "Compose",
+          "runAfter": {},
+          "inputs": "@if(less(triggerBody()?['benefitRealizationPct'], 70), 'Critical', 'Warning')"
+        },
+
+        "Send_Alert_to_Owner_and_TL": {
+          "type": "ApiConnection",
+          "runAfter": { "Set_Alert_Severity": ["Succeeded"] },
+          "inputs": {
+            "host": { "connection": { "name": "@parameters('$connections')['office365']['connectionId']" } },
+            "method": "post",
+            "path": "/v2/Mail/Send",
+            "body": {
+              "To": "@triggerBody()?['ownerEmail']",
+              "CC": "@parameters('TransformLeadEmail')",
+              "Subject": "@{outputs('Set_Alert_Severity')} — Benefit Realization at @{triggerBody()?['benefitRealizationPct']}%: @{triggerBody()?['initiativeName']}",
+              "Body": "<div style='border-left:5px solid @{if(equals(outputs(\"Set_Alert_Severity\"), \"Critical\"), \"#E74C3C\", \"#F39C12\")};padding:16px;font-family:Arial'><h3>Benefit Realization Below Target</h3><p>Hi @{triggerBody()?['ownerName']},</p><p>The <b>@{triggerBody()?['initiativeName']}</b> initiative is realizing @{triggerBody()?['benefitRealizationPct']}% of projected benefits (target: 85%).</p><table><tr><td><b>Projected YTD</b></td><td>R@{triggerBody()?['projectedBenefitsYTD']}</td></tr><tr><td><b>Actual YTD</b></td><td>R@{triggerBody()?['actualBenefitsYTD']}</td></tr><tr><td style='color:#E74C3C'><b>Gap</b></td><td style='color:#E74C3C'><b>R@{triggerBody()?['gapAmount']}</b></td></tr><tr><td><b>Top Underachieving Metric</b></td><td>@{triggerBody()?['topUnderachievingMetric']}</td></tr></table><h4>Recommended Actions</h4><ul><li>Review adoption metrics for this initiative</li><li>Identify if the baseline measurement was accurate</li><li>Check if scope changes have affected the expected benefit</li><li>Schedule a retrospective with the delivery team</li></ul></div>",
+              "IsHtml": true,
+              "Importance": "@{if(equals(outputs('Set_Alert_Severity'), 'Critical'), 'High', 'Normal')}"
+            }
+          }
+        },
+
+        "Post_Alert_to_Teams": {
+          "type": "Http",
+          "runAfter": { "Send_Alert_to_Owner_and_TL": ["Succeeded"] },
+          "inputs": {
+            "method": "POST",
+            "uri": "@parameters('TeamsWebhookUrl')",
+            "body": {
+              "type": "message",
+              "attachments": [{
+                "contentType": "application/vnd.microsoft.card.adaptive",
+                "content": {
+                  "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
+                  "type": "AdaptiveCard",
+                  "version": "1.4",
+                  "body": [
+                    { "type": "TextBlock", "text": "@{if(equals(outputs('Set_Alert_Severity'), 'Critical'), '🚨', '⚠')} Benefit Realization Alert", "weight": "Bolder", "size": "Medium", "color": "@{if(equals(outputs('Set_Alert_Severity'), 'Critical'), 'Attention', 'Warning')}" },
+                    { "type": "TextBlock", "text": "@{triggerBody()?['initiativeName']}", "wrap": true, "weight": "Bolder" },
+                    { "type": "FactSet", "facts": [
+                      { "title": "Realization",  "value": "@{triggerBody()?['benefitRealizationPct']}% (target: 85%)" },
+                      { "title": "Gap",          "value": "R@{triggerBody()?['gapAmount']}" },
+                      { "title": "Top Issue",    "value": "@{triggerBody()?['topUnderachievingMetric']}" },
+                      { "title": "Owner",        "value": "@{triggerBody()?['ownerName']}" }
+                    ]}
+                  ]
+                }
+              }]
+            }
+          }
+        }
+
+      }
+    }
+  }
+}

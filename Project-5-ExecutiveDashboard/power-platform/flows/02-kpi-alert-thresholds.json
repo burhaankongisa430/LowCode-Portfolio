@@ -1,0 +1,222 @@
+{
+  "properties": {
+    "displayName": "EXEC-02 KPI Threshold Alert",
+    "description": "Triggered by the Quickbase automation or the Python ETL pipeline when any KPI breaches a Warning or Critical threshold. Routes alerts to the relevant domain owner and notifies the CEO for Critical severity.",
+    "state": "Started",
+    "definition": {
+      "$schema": "https://schema.management.azure.com/providers/Microsoft.Logic/schemas/2016-06-01/workflowdefinition.json#",
+      "contentVersion": "1.0.0.0",
+      "parameters": {
+        "$connections":    { "defaultValue": {}, "type": "Object" },
+        "$authentication": { "defaultValue": {}, "type": "SecureObject" },
+        "CEOEmail":        { "defaultValue": "ceo@yourcompany.com", "type": "String" },
+        "COOEmail":        { "defaultValue": "coo@yourcompany.com", "type": "String" },
+        "CROEmail":        { "defaultValue": "cro@yourcompany.com", "type": "String" },
+        "CHROEmail":       { "defaultValue": "chro@yourcompany.com", "type": "String" },
+        "CFOEmail":        { "defaultValue": "cfo@yourcompany.com", "type": "String" },
+        "TeamsWebhookUrl": { "defaultValue": "", "type": "String" }
+      },
+      "triggers": {
+        "When_HTTP_Request_Received": {
+          "type": "Request",
+          "kind": "Http",
+          "inputs": {
+            "schema": {
+              "type": "object",
+              "required": ["alerts", "healthScore", "healthStatus"],
+              "properties": {
+                "snapshotId":       { "type": "string" },
+                "snapshotTime":     { "type": "string" },
+                "healthScore":      { "type": "number" },
+                "healthStatus":     { "type": "string" },
+                "weakestDomain":    { "type": "string" },
+                "operationalScore": { "type": "number" },
+                "commercialScore":  { "type": "number" },
+                "peopleScore":      { "type": "number" },
+                "financeScore":     { "type": "number" },
+                "alerts": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "domain":          { "type": "string" },
+                      "kpiName":         { "type": "string" },
+                      "currentValue":    { "type": "number" },
+                      "thresholdValue":  { "type": "number" },
+                      "severity":        { "type": "string" },
+                      "message":         { "type": "string" }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "actions": {
+
+        "Has_Critical_Alerts": {
+          "type": "Condition",
+          "runAfter": {},
+          "expression": {
+            "contains": [
+              "@string(triggerBody()?['alerts'])",
+              "Critical"
+            ]
+          },
+          "actions": {
+            "Notify_CEO_Critical": {
+              "type": "ApiConnection",
+              "inputs": {
+                "host": { "connection": { "name": "@parameters('$connections')['office365']['connectionId']" } },
+                "method": "post",
+                "path": "/v2/Mail/Send",
+                "body": {
+                  "To": "@parameters('CEOEmail')",
+                  "Subject": "🚨 CRITICAL KPI Alert — Health Score @{triggerBody()?['healthScore']}/100 (@{triggerBody()?['healthStatus']})",
+                  "Body": "<div style='border-left:5px solid #E74C3C;padding:16px;font-family:Arial'><h2 style='color:#E74C3C'>Critical KPI Alert</h2><p>One or more business KPIs have breached the Critical threshold. Immediate attention is required.</p><table style='border-collapse:collapse;width:100%'><tr style='background:#2C3E50;color:#fff'><th style='padding:8px'>Domain</th><th style='padding:8px'>KPI</th><th style='padding:8px'>Current</th><th style='padding:8px'>Threshold</th><th style='padding:8px'>Severity</th></tr>@{join(triggerBody()?['alerts'], '')}</table><h3>Domain Scores</h3><table><tr><td>Operational</td><td>@{triggerBody()?['operationalScore']}/100</td></tr><tr><td>Commercial</td><td>@{triggerBody()?['commercialScore']}/100</td></tr><tr><td>People</td><td>@{triggerBody()?['peopleScore']}/100</td></tr><tr><td>Finance</td><td>@{triggerBody()?['financeScore']}/100</td></tr></table></div>",
+                  "IsHtml": true
+                }
+              }
+            }
+          },
+          "else": { "actions": {} }
+        },
+
+        "For_Each_Alert": {
+          "type": "Foreach",
+          "runAfter": { "Has_Critical_Alerts": ["Succeeded"] },
+          "foreach": "@triggerBody()?['alerts']",
+          "actions": {
+            "Route_to_Domain_Owner": {
+              "type": "Switch",
+              "expression": "@items('For_Each_Alert')?['domain']",
+              "cases": {
+                "Operational": {
+                  "case": "Operational",
+                  "actions": {
+                    "Email_COO": {
+                      "type": "ApiConnection",
+                      "inputs": {
+                        "host": { "connection": { "name": "@parameters('$connections')['office365']['connectionId']" } },
+                        "method": "post",
+                        "path": "/v2/Mail/Send",
+                        "body": {
+                          "To": "@parameters('COOEmail')",
+                          "Subject": "@{items('For_Each_Alert')?['severity']} Alert: @{items('For_Each_Alert')?['kpiName']} (@{items('For_Each_Alert')?['currentValue']})",
+                          "Body": "<p>KPI Alert: <b>@{items('For_Each_Alert')?['kpiName']}</b></p><p>@{items('For_Each_Alert')?['message']}</p><p>Current: <b>@{items('For_Each_Alert')?['currentValue']}</b> | Threshold: @{items('For_Each_Alert')?['thresholdValue']}</p>",
+                          "IsHtml": true
+                        }
+                      }
+                    }
+                  }
+                },
+                "Commercial": {
+                  "case": "Commercial",
+                  "actions": {
+                    "Email_CRO": {
+                      "type": "ApiConnection",
+                      "inputs": {
+                        "host": { "connection": { "name": "@parameters('$connections')['office365']['connectionId']" } },
+                        "method": "post",
+                        "path": "/v2/Mail/Send",
+                        "body": {
+                          "To": "@parameters('CROEmail')",
+                          "Subject": "@{items('For_Each_Alert')?['severity']} Alert: @{items('For_Each_Alert')?['kpiName']} (@{items('For_Each_Alert')?['currentValue']})",
+                          "Body": "<p>KPI Alert: <b>@{items('For_Each_Alert')?['kpiName']}</b></p><p>@{items('For_Each_Alert')?['message']}</p>",
+                          "IsHtml": true
+                        }
+                      }
+                    }
+                  }
+                },
+                "People": {
+                  "case": "People",
+                  "actions": {
+                    "Email_CHRO": {
+                      "type": "ApiConnection",
+                      "inputs": {
+                        "host": { "connection": { "name": "@parameters('$connections')['office365']['connectionId']" } },
+                        "method": "post",
+                        "path": "/v2/Mail/Send",
+                        "body": {
+                          "To": "@parameters('CHROEmail')",
+                          "Subject": "@{items('For_Each_Alert')?['severity']} Alert: @{items('For_Each_Alert')?['kpiName']} (@{items('For_Each_Alert')?['currentValue']})",
+                          "Body": "<p>KPI Alert: <b>@{items('For_Each_Alert')?['kpiName']}</b></p><p>@{items('For_Each_Alert')?['message']}</p>",
+                          "IsHtml": true
+                        }
+                      }
+                    }
+                  }
+                },
+                "Finance": {
+                  "case": "Finance",
+                  "actions": {
+                    "Email_CFO": {
+                      "type": "ApiConnection",
+                      "inputs": {
+                        "host": { "connection": { "name": "@parameters('$connections')['office365']['connectionId']" } },
+                        "method": "post",
+                        "path": "/v2/Mail/Send",
+                        "body": {
+                          "To": "@parameters('CFOEmail')",
+                          "Subject": "@{items('For_Each_Alert')?['severity']} Alert: @{items('For_Each_Alert')?['kpiName']} (@{items('For_Each_Alert')?['currentValue']})",
+                          "Body": "<p>KPI Alert: <b>@{items('For_Each_Alert')?['kpiName']}</b></p><p>@{items('For_Each_Alert')?['message']}</p>",
+                          "IsHtml": true
+                        }
+                      }
+                    }
+                  }
+                }
+              },
+              "default": { "actions": {} }
+            }
+          }
+        },
+
+        "Post_Alert_to_Teams": {
+          "type": "Http",
+          "runAfter": { "For_Each_Alert": ["Succeeded"] },
+          "inputs": {
+            "method": "POST",
+            "uri": "@parameters('TeamsWebhookUrl')",
+            "body": {
+              "type": "message",
+              "attachments": [{
+                "contentType": "application/vnd.microsoft.card.adaptive",
+                "content": {
+                  "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
+                  "type": "AdaptiveCard",
+                  "version": "1.4",
+                  "body": [
+                    {
+                      "type": "TextBlock",
+                      "text": "@{if(contains(string(triggerBody()?['alerts']), 'Critical'), '🚨', '⚠')} KPI Alert — @{triggerBody()?['healthStatus']}",
+                      "weight": "Bolder",
+                      "size": "Large",
+                      "color": "@{if(contains(string(triggerBody()?['alerts']), 'Critical'), 'Attention', 'Warning')}"
+                    },
+                    {
+                      "type": "TextBlock",
+                      "text": "Health Score: **@{triggerBody()?['healthScore']}/100** | Weakest: @{triggerBody()?['weakestDomain']}",
+                      "wrap": true
+                    },
+                    {
+                      "type": "TextBlock",
+                      "text": "@{length(triggerBody()?['alerts'])} KPI(s) breached threshold at @{formatDateTime(triggerBody()?['snapshotTime'], 'HH:mm ddd d MMM')}",
+                      "isSubtle": true
+                    }
+                  ],
+                  "actions": [
+                    { "type": "Action.OpenUrl", "title": "Open Dashboard", "url": "https://app.powerbi.com/groups/{{workspaceId}}/dashboards/{{dashboardId}}" }
+                  ]
+                }
+              }]
+            }
+          }
+        }
+
+      }
+    }
+  }
+}

@@ -1,0 +1,200 @@
+{
+  "properties": {
+    "displayName": "PROC-03 Final Approval — PO Generation & ERP Sync",
+    "description": "Called when all required approval levels are satisfied. Updates the QB request to Approved, triggers the Python PO generator, emails the PO to the vendor and requestor, and pushes the PO data to the ERP system.",
+    "state": "Started",
+    "definition": {
+      "$schema": "https://schema.management.azure.com/providers/Microsoft.Logic/schemas/2016-06-01/workflowdefinition.json#",
+      "contentVersion": "1.0.0.0",
+      "parameters": {
+        "$connections":        { "defaultValue": {}, "type": "Object" },
+        "$authentication":     { "defaultValue": {}, "type": "SecureObject" },
+        "QBRealmHostname":     { "defaultValue": "yourcompany.quickbase.com", "type": "String" },
+        "QBUserToken":         { "defaultValue": "", "type": "SecureString" },
+        "QBRequestsTableId":   { "defaultValue": "", "type": "String" },
+        "QBApprovalHistoryId": { "defaultValue": "", "type": "String" },
+        "POGeneratorUrl":      { "defaultValue": "", "type": "String" },
+        "FinanceEmail":        { "defaultValue": "finance@yourcompany.com", "type": "String" }
+      },
+      "triggers": {
+        "When_HTTP_Request_Received": {
+          "type": "Request",
+          "kind": "Http",
+          "inputs": {
+            "schema": {
+              "type": "object",
+              "required": ["requestRecordId", "requestNumber", "totalAmount", "approvedBy", "requestorEmail"],
+              "properties": {
+                "requestRecordId": { "type": "integer" },
+                "requestNumber":   { "type": "string" },
+                "title":           { "type": "string" },
+                "totalAmount":     { "type": "number" },
+                "vendorName":      { "type": "string" },
+                "vendorEmail":     { "type": "string" },
+                "budgetCode":      { "type": "string" },
+                "department":      { "type": "string" },
+                "paymentTerms":    { "type": "string" },
+                "deliveryAddress": { "type": "string" },
+                "requestorName":   { "type": "string" },
+                "requestorEmail":  { "type": "string" },
+                "approvedBy":      { "type": "string" },
+                "approvalLevel":   { "type": "integer" },
+                "currency":        { "type": "string" }
+              }
+            }
+          }
+        }
+      },
+      "actions": {
+
+        "Update_QB_Approved": {
+          "type": "Http",
+          "runAfter": {},
+          "inputs": {
+            "method": "POST",
+            "uri": "https://api.quickbase.com/v1/records",
+            "headers": {
+              "QB-Realm-Hostname": "@parameters('QBRealmHostname')",
+              "Authorization": "QB-USER-TOKEN @{parameters('QBUserToken')}",
+              "Content-Type": "application/json"
+            },
+            "body": {
+              "to": "@parameters('QBRequestsTableId')",
+              "data": [{
+                "3":  { "value": "@triggerBody()?['requestRecordId']" },
+                "19": { "value": "Approved" },
+                "30": { "value": "@triggerBody()?['approvedBy']" },
+                "31": { "value": "@utcNow()" }
+              }]
+            }
+          }
+        },
+
+        "Log_Final_Approval": {
+          "type": "Http",
+          "runAfter": { "Update_QB_Approved": ["Succeeded"] },
+          "inputs": {
+            "method": "POST",
+            "uri": "https://api.quickbase.com/v1/records",
+            "headers": {
+              "QB-Realm-Hostname": "@parameters('QBRealmHostname')",
+              "Authorization": "QB-USER-TOKEN @{parameters('QBUserToken')}",
+              "Content-Type": "application/json"
+            },
+            "body": {
+              "to": "@parameters('QBApprovalHistoryId')",
+              "data": [{
+                "6":  { "value": "@triggerBody()?['requestRecordId']" },
+                "7":  { "value": "@triggerBody()?['approvalLevel']" },
+                "8":  { "value": "@triggerBody()?['approvedBy']" },
+                "10": { "value": "Approved" },
+                "11": { "value": "Final approval granted. PO generation triggered." },
+                "12": { "value": "@utcNow()" },
+                "15": { "value": "Email" }
+              }]
+            }
+          }
+        },
+
+        "Generate_PO": {
+          "type": "Http",
+          "runAfter": { "Log_Final_Approval": ["Succeeded"] },
+          "inputs": {
+            "method": "POST",
+            "uri": "@parameters('POGeneratorUrl')",
+            "headers": { "Content-Type": "application/json" },
+            "body": {
+              "requestRecordId": "@triggerBody()?['requestRecordId']",
+              "requestNumber":   "@triggerBody()?['requestNumber']",
+              "title":           "@triggerBody()?['title']",
+              "totalAmount":     "@triggerBody()?['totalAmount']",
+              "currency":        "@coalesce(triggerBody()?['currency'], 'ZAR')",
+              "vendorName":      "@triggerBody()?['vendorName']",
+              "vendorEmail":     "@triggerBody()?['vendorEmail']",
+              "budgetCode":      "@triggerBody()?['budgetCode']",
+              "department":      "@triggerBody()?['department']",
+              "paymentTerms":    "@coalesce(triggerBody()?['paymentTerms'], 'Net 30')",
+              "deliveryAddress": "@triggerBody()?['deliveryAddress']",
+              "requestorName":   "@triggerBody()?['requestorName']",
+              "approvedBy":      "@triggerBody()?['approvedBy']",
+              "approvalDate":    "@utcNow()"
+            }
+          }
+        },
+
+        "Parse_PO_Response": {
+          "type": "ParseJson",
+          "runAfter": { "Generate_PO": ["Succeeded"] },
+          "inputs": {
+            "content": "@body('Generate_PO')",
+            "schema": {
+              "type": "object",
+              "properties": {
+                "poNumber":  { "type": "string" },
+                "poHtml":    { "type": "string" },
+                "poRecordId":{ "type": "integer" }
+              }
+            }
+          }
+        },
+
+        "Update_QB_PO_Issued": {
+          "type": "Http",
+          "runAfter": { "Parse_PO_Response": ["Succeeded"] },
+          "inputs": {
+            "method": "POST",
+            "uri": "https://api.quickbase.com/v1/records",
+            "headers": {
+              "QB-Realm-Hostname": "@parameters('QBRealmHostname')",
+              "Authorization": "QB-USER-TOKEN @{parameters('QBUserToken')}",
+              "Content-Type": "application/json"
+            },
+            "body": {
+              "to": "@parameters('QBRequestsTableId')",
+              "data": [{
+                "3":  { "value": "@triggerBody()?['requestRecordId']" },
+                "19": { "value": "PO Issued" },
+                "32": { "value": "@body('Parse_PO_Response')?['poNumber']" },
+                "33": { "value": "@formatDateTime(utcNow(), 'yyyy-MM-dd')" }
+              }]
+            }
+          }
+        },
+
+        "Email_PO_to_Vendor": {
+          "type": "ApiConnection",
+          "runAfter": { "Update_QB_PO_Issued": ["Succeeded"] },
+          "inputs": {
+            "host": { "connection": { "name": "@parameters('$connections')['office365']['connectionId']" } },
+            "method": "post",
+            "path": "/v2/Mail/Send",
+            "body": {
+              "To": "@triggerBody()?['vendorEmail']",
+              "CC": "@{triggerBody()?['requestorEmail']};@{parameters('FinanceEmail')}",
+              "Subject": "Purchase Order @{body('Parse_PO_Response')?['poNumber']} — @{triggerBody()?['department']}",
+              "Body": "@body('Parse_PO_Response')?['poHtml']",
+              "IsHtml": true
+            }
+          }
+        },
+
+        "Notify_Requestor_Approval": {
+          "type": "ApiConnection",
+          "runAfter": { "Email_PO_to_Vendor": ["Succeeded"] },
+          "inputs": {
+            "host": { "connection": { "name": "@parameters('$connections')['office365']['connectionId']" } },
+            "method": "post",
+            "path": "/v2/Mail/Send",
+            "body": {
+              "To": "@triggerBody()?['requestorEmail']",
+              "Subject": "✅ Purchase Request Approved & PO Issued: @{triggerBody()?['requestNumber']}",
+              "Body": "<p>Hi @{triggerBody()?['requestorName']},</p><p>Your purchase request has been <b>fully approved</b> and a Purchase Order has been issued to the vendor.</p><table style='border-collapse:collapse;width:100%'><tr style='background:#2ECC71;color:#fff'><th style='padding:8px' colspan='2'>Approval Confirmation</th></tr><tr><td style='padding:8px;font-weight:bold'>Request Number</td><td style='padding:8px'>@{triggerBody()?['requestNumber']}</td></tr><tr style='background:#f8f8f8'><td style='padding:8px;font-weight:bold'>PO Number</td><td style='padding:8px'>@{body('Parse_PO_Response')?['poNumber']}</td></tr><tr><td style='padding:8px;font-weight:bold'>Vendor</td><td style='padding:8px'>@{triggerBody()?['vendorName']}</td></tr><tr style='background:#f8f8f8'><td style='padding:8px;font-weight:bold'>Amount</td><td style='padding:8px;font-weight:bold;color:#27AE60'>@{coalesce(triggerBody()?['currency'], 'R')} @{triggerBody()?['totalAmount']}</td></tr><tr><td style='padding:8px;font-weight:bold'>Approved By</td><td style='padding:8px'>@{triggerBody()?['approvedBy']}</td></tr><tr style='background:#f8f8f8'><td style='padding:8px;font-weight:bold'>Payment Terms</td><td style='padding:8px'>@{coalesce(triggerBody()?['paymentTerms'], 'Net 30')}</td></tr></table><p>The vendor has been copied on the PO. Please follow up if goods/services are not received within the expected timeframe.</p>",
+              "IsHtml": true
+            }
+          }
+        }
+
+      }
+    }
+  }
+}

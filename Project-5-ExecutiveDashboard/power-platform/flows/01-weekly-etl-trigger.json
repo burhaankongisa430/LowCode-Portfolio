@@ -1,0 +1,136 @@
+{
+  "properties": {
+    "displayName": "EXEC-01 Weekly ETL Trigger & Health Check",
+    "description": "Runs every Monday at 06:30 SAST. Calls the Python ETL pipeline to refresh KPIs, verifies the pipeline ran successfully, and posts a health check card to the executive Teams channel. If the pipeline fails, alerts the ops team.",
+    "state": "Started",
+    "definition": {
+      "$schema": "https://schema.management.azure.com/providers/Microsoft.Logic/schemas/2016-06-01/workflowdefinition.json#",
+      "contentVersion": "1.0.0.0",
+      "parameters": {
+        "$connections":      { "defaultValue": {}, "type": "Object" },
+        "$authentication":   { "defaultValue": {}, "type": "SecureObject" },
+        "ETLTriggerUrl":     { "defaultValue": "", "type": "String" },
+        "TeamsWebhookUrl":   { "defaultValue": "", "type": "String" },
+        "OpsAlertEmail":     { "defaultValue": "etl-ops@yourcompany.com", "type": "String" }
+      },
+      "triggers": {
+        "Recurrence_Monday_0630": {
+          "type": "Recurrence",
+          "recurrence": {
+            "frequency": "Week",
+            "interval": 1,
+            "schedule": { "weekDays": ["Monday"], "hours": ["6"], "minutes": [30] },
+            "timeZone": "South Africa Standard Time"
+          }
+        }
+      },
+      "actions": {
+
+        "Trigger_ETL_Pipeline": {
+          "type": "Http",
+          "runAfter": {},
+          "inputs": {
+            "method": "POST",
+            "uri": "@parameters('ETLTriggerUrl')",
+            "headers": { "Content-Type": "application/json" },
+            "body": { "trigger": "scheduled_weekly", "timestamp": "@utcNow()" },
+            "retryPolicy": { "type": "fixed", "count": 2, "interval": "PT2M" }
+          }
+        },
+
+        "Parse_ETL_Result": {
+          "type": "ParseJson",
+          "runAfter": { "Trigger_ETL_Pipeline": ["Succeeded"] },
+          "inputs": {
+            "content": "@body('Trigger_ETL_Pipeline')",
+            "schema": {
+              "type": "object",
+              "properties": {
+                "healthScore":       { "type": "number" },
+                "healthStatus":      { "type": "string" },
+                "operationalScore":  { "type": "number" },
+                "commercialScore":   { "type": "number" },
+                "peopleScore":       { "type": "number" },
+                "financeScore":      { "type": "number" },
+                "domainsAvailable":  { "type": "integer" },
+                "etlDurationSeconds":{ "type": "number" },
+                "errors":            { "type": "array" }
+              }
+            }
+          }
+        },
+
+        "Post_Weekly_Health_to_Teams": {
+          "type": "Http",
+          "runAfter": { "Parse_ETL_Result": ["Succeeded"] },
+          "inputs": {
+            "method": "POST",
+            "uri": "@parameters('TeamsWebhookUrl')",
+            "body": {
+              "type": "message",
+              "attachments": [{
+                "contentType": "application/vnd.microsoft.card.adaptive",
+                "content": {
+                  "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
+                  "type": "AdaptiveCard",
+                  "version": "1.4",
+                  "body": [
+                    {
+                      "type": "ColumnSet",
+                      "columns": [
+                        {
+                          "type": "Column",
+                          "width": "auto",
+                          "items": [{ "type": "TextBlock", "text": "📊", "size": "ExtraLarge" }]
+                        },
+                        {
+                          "type": "Column",
+                          "width": "stretch",
+                          "items": [
+                            { "type": "TextBlock", "text": "Monday Morning KPI Briefing", "weight": "Bolder", "size": "Large" },
+                            { "type": "TextBlock", "text": "@{formatDateTime(utcNow(), 'dddd, d MMMM yyyy')}", "isSubtle": true }
+                          ]
+                        }
+                      ]
+                    },
+                    {
+                      "type": "FactSet",
+                      "facts": [
+                        { "title": "🏥 Health Score",      "value": "@{body('Parse_ETL_Result')?['healthScore']}/100 — @{body('Parse_ETL_Result')?['healthStatus']}" },
+                        { "title": "⚙ Operational",        "value": "@{body('Parse_ETL_Result')?['operationalScore']}/100" },
+                        { "title": "💼 Commercial",         "value": "@{body('Parse_ETL_Result')?['commercialScore']}/100" },
+                        { "title": "👥 People",             "value": "@{body('Parse_ETL_Result')?['peopleScore']}/100" },
+                        { "title": "💰 Finance",            "value": "@{body('Parse_ETL_Result')?['financeScore']}/100" },
+                        { "title": "📡 Data Sources",       "value": "@{body('Parse_ETL_Result')?['domainsAvailable']}/4 systems available" }
+                      ]
+                    }
+                  ],
+                  "actions": [
+                    { "type": "Action.OpenUrl", "title": "Open Full Dashboard", "url": "https://app.powerbi.com/groups/{{workspaceId}}/dashboards/{{dashboardId}}" }
+                  ]
+                }
+              }]
+            }
+          }
+        },
+
+        "ETL_Failed_Alert": {
+          "type": "ApiConnection",
+          "runAfter": { "Trigger_ETL_Pipeline": ["Failed", "TimedOut"] },
+          "inputs": {
+            "host": { "connection": { "name": "@parameters('$connections')['office365']['connectionId']" } },
+            "method": "post",
+            "path": "/v2/Mail/Send",
+            "body": {
+              "To": "@parameters('OpsAlertEmail')",
+              "Subject": "🚨 EXEC Dashboard ETL Failed — @{formatDateTime(utcNow(), 'ddd d MMM HH:mm')} SAST",
+              "Body": "<p>The weekly executive KPI ETL pipeline failed to run. The dashboard data may be stale.</p><p><b>Time:</b> @{utcNow()}</p><p>Please check the Python ETL server logs and re-trigger manually via POST /api/kpi/run-etl</p>",
+              "IsHtml": true
+            }
+          }
+        }
+
+      }
+    }
+  }
+}

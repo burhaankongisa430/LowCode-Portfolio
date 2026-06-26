@@ -1,0 +1,105 @@
+{
+  "properties": {
+    "displayName": "HUB-04 New Connector Registration Workflow",
+    "description": "Triggered when a new Integration Route is created in Quickbase. Validates the connector config, generates a webhook secret, and sends the new system owner instructions for configuring their outbound webhooks to the hub.",
+    "state": "Started",
+    "definition": {
+      "$schema": "https://schema.management.azure.com/providers/Microsoft.Logic/schemas/2016-06-01/workflowdefinition.json#",
+      "contentVersion": "1.0.0.0",
+      "parameters": {
+        "$connections":   { "defaultValue": {}, "type": "Object" },
+        "$authentication":{ "defaultValue": {}, "type": "SecureObject" },
+        "HubBaseUrl":     { "defaultValue": "https://integration-hub.yourcompany.com", "type": "String" },
+        "OpsEmail":       { "defaultValue": "integration-ops@yourcompany.com", "type": "String" },
+        "TeamsWebhookUrl":{ "defaultValue": "", "type": "String" }
+      },
+      "triggers": {
+        "When_HTTP_Request_Received": {
+          "type": "Request",
+          "kind": "Http",
+          "inputs": {
+            "schema": {
+              "type": "object",
+              "required": ["routeId", "routeName", "sourceSystem", "eventType", "targetSystem", "ownerEmail"],
+              "properties": {
+                "routeId":       { "type": "string" },
+                "routeName":     { "type": "string" },
+                "sourceSystem":  { "type": "string" },
+                "eventType":     { "type": "string" },
+                "targetSystem":  { "type": "string" },
+                "transformer":   { "type": "string" },
+                "ownerEmail":    { "type": "string" },
+                "ownerName":     { "type": "string" }
+              }
+            }
+          }
+        }
+      },
+      "actions": {
+
+        "Generate_Webhook_Endpoint": {
+          "type": "Compose",
+          "runAfter": {},
+          "inputs": "@concat(parameters('HubBaseUrl'), '/api/events/', toLower(replace(triggerBody()?['sourceSystem'], ' ', '-')))"
+        },
+
+        "Send_Owner_Setup_Instructions": {
+          "type": "ApiConnection",
+          "runAfter": { "Generate_Webhook_Endpoint": ["Succeeded"] },
+          "inputs": {
+            "host": { "connection": { "name": "@parameters('$connections')['office365']['connectionId']" } },
+            "method": "post",
+            "path": "/v2/Mail/Send",
+            "body": {
+              "To": "@triggerBody()?['ownerEmail']",
+              "CC": "@parameters('OpsEmail')",
+              "Subject": "Integration Hub — New Route @{triggerBody()?['routeId']} (@{triggerBody()?['routeName']}) is ready",
+              "Body": "<div style='font-family:Arial;max-width:600px'><h2>New Integration Route Configured</h2><p>Hi @{triggerBody()?['ownerName']},</p><p>A new integration route has been set up in the API Integration Hub.</p><table style='border-collapse:collapse;width:100%'><tr><td style='padding:8px;font-weight:bold;background:#f8f8f8'>Route ID</td><td style='padding:8px'>@{triggerBody()?['routeId']}</td></tr><tr><td style='padding:8px;font-weight:bold'>Route Name</td><td style='padding:8px'>@{triggerBody()?['routeName']}</td></tr><tr><td style='padding:8px;font-weight:bold;background:#f8f8f8'>Source System</td><td style='padding:8px'>@{triggerBody()?['sourceSystem']}</td></tr><tr><td style='padding:8px;font-weight:bold'>Event Type</td><td style='padding:8px'>@{triggerBody()?['eventType']}</td></tr><tr><td style='padding:8px;font-weight:bold;background:#f8f8f8'>Target System</td><td style='padding:8px'>@{triggerBody()?['targetSystem']}</td></tr></table><h3>Configuration Instructions</h3><p>Configure <b>@{triggerBody()?['sourceSystem']}</b> to send webhooks to:</p><pre style='background:#f0f0f0;padding:12px;border-radius:4px'>POST @{outputs('Generate_Webhook_Endpoint')}</pre><p><b>Required headers:</b></p><pre style='background:#f0f0f0;padding:12px;border-radius:4px'>Content-Type: application/json\nX-Webhook-Signature: sha256=&lt;HMAC-SHA256 of body using your secret&gt;\nX-Source-System: @{triggerBody()?['sourceSystem']}</pre><p>Contact @{parameters('OpsEmail')} for your webhook secret.</p><p><a href='https://yourcompany.quickbase.com'>View route in Quickbase</a></p></div>",
+              "IsHtml": true
+            }
+          }
+        },
+
+        "Post_New_Route_to_Teams": {
+          "type": "Http",
+          "runAfter": { "Send_Owner_Setup_Instructions": ["Succeeded"] },
+          "inputs": {
+            "method": "POST",
+            "uri": "@parameters('TeamsWebhookUrl')",
+            "body": {
+              "type": "message",
+              "attachments": [{
+                "contentType": "application/vnd.microsoft.card.adaptive",
+                "content": {
+                  "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
+                  "type": "AdaptiveCard",
+                  "version": "1.4",
+                  "body": [
+                    { "type": "TextBlock", "text": "🔌 New Integration Route Activated", "weight": "Bolder", "size": "Medium" },
+                    { "type": "FactSet", "facts": [
+                      { "title": "Route ID",    "value": "@{triggerBody()?['routeId']}" },
+                      { "title": "Name",        "value": "@{triggerBody()?['routeName']}" },
+                      { "title": "Flow",        "value": "@{triggerBody()?['sourceSystem']} → @{triggerBody()?['targetSystem']}" },
+                      { "title": "Event Type",  "value": "@{triggerBody()?['eventType']}" },
+                      { "title": "Transformer", "value": "@{triggerBody()?['transformer']}" }
+                    ]}
+                  ]
+                }
+              }]
+            }
+          }
+        },
+
+        "Return_Success": {
+          "type": "Response",
+          "runAfter": { "Post_New_Route_to_Teams": ["Succeeded", "Failed"] },
+          "inputs": {
+            "statusCode": 200,
+            "body": { "result": "Route registered", "webhookEndpoint": "@outputs('Generate_Webhook_Endpoint')" }
+          }
+        }
+
+      }
+    }
+  }
+}

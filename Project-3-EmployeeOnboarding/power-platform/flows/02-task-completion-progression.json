@@ -1,0 +1,149 @@
+{
+  "properties": {
+    "displayName": "OB-02 Task Completion — Progress Update & Phase Check",
+    "description": "Triggered when an onboarding task is marked complete. Notifies the task owner, checks if the current phase is now fully complete, and triggers a milestone notification if so.",
+    "state": "Started",
+    "definition": {
+      "$schema": "https://schema.management.azure.com/providers/Microsoft.Logic/schemas/2016-06-01/workflowdefinition.json#",
+      "contentVersion": "1.0.0.0",
+      "parameters": {
+        "$connections": { "defaultValue": {}, "type": "Object" },
+        "$authentication": { "defaultValue": {}, "type": "SecureObject" },
+        "QBRealmHostname":      { "defaultValue": "yourcompany.quickbase.com", "type": "String" },
+        "QBUserToken":          { "defaultValue": "", "type": "SecureString" },
+        "QBTasksTableId":       { "defaultValue": "", "type": "String" },
+        "QBEmployeesTableId":   { "defaultValue": "", "type": "String" },
+        "MilestoneFlowUrl":     { "defaultValue": "", "type": "String" }
+      },
+      "triggers": {
+        "When_HTTP_Request_Received": {
+          "type": "Request",
+          "kind": "Http",
+          "inputs": {
+            "schema": {
+              "type": "object",
+              "required": ["taskRecordId", "taskName", "phase", "employeeRecordId", "employeeId", "employeeName", "managerEmail"],
+              "properties": {
+                "taskRecordId":      { "type": "integer" },
+                "taskName":          { "type": "string" },
+                "phase":             { "type": "string" },
+                "ownerName":         { "type": "string" },
+                "ownerEmail":        { "type": "string" },
+                "employeeRecordId":  { "type": "integer" },
+                "employeeId":        { "type": "string" },
+                "employeeName":      { "type": "string" },
+                "managerEmail":      { "type": "string" },
+                "overallProgress":   { "type": "number" },
+                "completedTasks":    { "type": "integer" },
+                "totalTasks":        { "type": "integer" }
+              }
+            }
+          }
+        }
+      },
+      "actions": {
+
+        "Confirm_Task_Owner": {
+          "type": "Condition",
+          "runAfter": {},
+          "expression": { "and": [
+            { "not": { "equals": ["@triggerBody()?['ownerEmail']", ""] } },
+            { "not": { "equals": ["@triggerBody()?['ownerEmail']", null] } }
+          ]},
+          "actions": {
+            "Send_Task_Completion_Acknowledgement": {
+              "type": "ApiConnection",
+              "inputs": {
+                "host": { "connection": { "name": "@parameters('$connections')['office365']['connectionId']" } },
+                "method": "post",
+                "path": "/v2/Mail/Send",
+                "body": {
+                  "To": "@triggerBody()?['ownerEmail']",
+                  "Subject": "✅ Task Completed: @{triggerBody()?['taskName']} for @{triggerBody()?['employeeName']}",
+                  "Body": "<p>Hi @{triggerBody()?['ownerName']},</p><p>The following onboarding task has been marked complete:</p><table><tr><td><b>Task</b></td><td>@{triggerBody()?['taskName']}</td></tr><tr><td><b>Phase</b></td><td>@{triggerBody()?['phase']}</td></tr><tr><td><b>New Hire</b></td><td>@{triggerBody()?['employeeName']}</td></tr><tr><td><b>Overall Progress</b></td><td>@{triggerBody()?['overallProgress']}% (@{triggerBody()?['completedTasks']} of @{triggerBody()?['totalTasks']} tasks)</td></tr></table><p>Thank you for keeping the onboarding on track.</p>",
+                  "IsHtml": true
+                }
+              }
+            }
+          },
+          "else": { "actions": {} }
+        },
+
+        "Check_Phase_Tasks_Remaining": {
+          "type": "Http",
+          "runAfter": { "Confirm_Task_Owner": ["Succeeded"] },
+          "inputs": {
+            "method": "POST",
+            "uri": "https://api.quickbase.com/v1/records/query",
+            "headers": {
+              "QB-Realm-Hostname": "@parameters('QBRealmHostname')",
+              "Authorization": "QB-USER-TOKEN @{parameters('QBUserToken')}",
+              "Content-Type": "application/json"
+            },
+            "body": {
+              "from": "@parameters('QBTasksTableId')",
+              "select": [3, 8, 9, 13],
+              "where": "@concat('{7.EX.', string(triggerBody()?['employeeRecordId']), '} AND {9.EX.\"', triggerBody()?['phase'], '\"} AND {13.XEX.\"Completed\"} AND {13.XEX.\"N/A\"}')",
+              "options": { "top": 1 }
+            }
+          }
+        },
+
+        "Parse_Remaining_Tasks": {
+          "type": "ParseJson",
+          "runAfter": { "Check_Phase_Tasks_Remaining": ["Succeeded"] },
+          "inputs": {
+            "content": "@body('Check_Phase_Tasks_Remaining')",
+            "schema": {
+              "type": "object",
+              "properties": {
+                "metadata": { "type": "object", "properties": { "numRecords": { "type": "integer" } } }
+              }
+            }
+          }
+        },
+
+        "Phase_Complete": {
+          "type": "Condition",
+          "runAfter": { "Parse_Remaining_Tasks": ["Succeeded"] },
+          "expression": { "equals": ["@body('Parse_Remaining_Tasks')?['metadata']?['numRecords']", 0] },
+          "actions": {
+            "Trigger_Milestone_Flow": {
+              "type": "Http",
+              "inputs": {
+                "method": "POST",
+                "uri": "@parameters('MilestoneFlowUrl')",
+                "body": {
+                  "employeeRecordId": "@triggerBody()?['employeeRecordId']",
+                  "employeeId":       "@triggerBody()?['employeeId']",
+                  "employeeName":     "@triggerBody()?['employeeName']",
+                  "managerEmail":     "@triggerBody()?['managerEmail']",
+                  "milestonePhase":   "@triggerBody()?['phase']",
+                  "overallProgress":  "@triggerBody()?['overallProgress']",
+                  "completedTasks":   "@triggerBody()?['completedTasks']",
+                  "totalTasks":       "@triggerBody()?['totalTasks']"
+                }
+              }
+            }
+          },
+          "else": { "actions": {} }
+        },
+
+        "Return_Success": {
+          "type": "Response",
+          "runAfter": { "Phase_Complete": ["Succeeded"] },
+          "inputs": {
+            "statusCode": 200,
+            "body": {
+              "result":          "Task completion processed",
+              "phaseComplete":   "@equals(body('Parse_Remaining_Tasks')?['metadata']?['numRecords'], 0)",
+              "employeeId":      "@triggerBody()?['employeeId']",
+              "overallProgress": "@triggerBody()?['overallProgress']"
+            }
+          }
+        }
+
+      }
+    }
+  }
+}

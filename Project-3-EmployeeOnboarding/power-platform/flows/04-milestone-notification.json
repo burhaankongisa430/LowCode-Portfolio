@@ -1,0 +1,255 @@
+﻿{
+  "properties": {
+    "displayName": "OB-04 Milestone Phase Completion Notification",
+    "description": "Triggered when all tasks in a phase are marked complete. Sends phase-specific celebration messages to the new hire, manager, and HR. Posts a milestone card to the team Teams channel. Triggers a congratulations email when overall onboarding reaches 100%.",
+    "state": "Started",
+    "definition": {
+      "$schema": "https://schema.management.azure.com/providers/Microsoft.Logic/schemas/2016-06-01/workflowdefinition.json#",
+      "contentVersion": "1.0.0.0",
+      "parameters": {
+        "$connections": { "defaultValue": {}, "type": "Object" },
+        "$authentication": { "defaultValue": {}, "type": "SecureObject" },
+        "QBRealmHostname":    { "defaultValue": "yourcompany.quickbase.com", "type": "String" },
+        "QBUserToken":        { "defaultValue": "", "type": "SecureString" },
+        "QBEmployeesTableId": { "defaultValue": "", "type": "String" },
+        "HREmail":            { "defaultValue": "hr@yourcompany.com", "type": "String" },
+        "TeamsWebhookUrl":    { "defaultValue": "", "type": "String" }
+      },
+      "triggers": {
+        "When_HTTP_Request_Received": {
+          "type": "Request",
+          "kind": "Http",
+          "inputs": {
+            "schema": {
+              "type": "object",
+              "required": ["employeeRecordId", "employeeName", "milestonePhase", "overallProgress", "managerEmail"],
+              "properties": {
+                "employeeRecordId": { "type": "integer" },
+                "employeeId":       { "type": "string" },
+                "employeeName":     { "type": "string" },
+                "managerEmail":     { "type": "string" },
+                "workEmail":        { "type": "string" },
+                "milestonePhase":   { "type": "string" },
+                "overallProgress":  { "type": "number" },
+                "completedTasks":   { "type": "integer" },
+                "totalTasks":       { "type": "integer" }
+              }
+            }
+          }
+        }
+      },
+      "actions": {
+
+        "Set_Phase_Milestone_Message": {
+          "type": "Switch",
+          "runAfter": {},
+          "expression": "@triggerBody()?['milestonePhase']",
+          "cases": {
+
+            "Pre_boarding": {
+              "case": "Pre-boarding",
+              "actions": {
+                "Set_Preboarding_Message": {
+                  "type": "Compose",
+                  "inputs": {
+                    "emoji":   "🏁",
+                    "headline":"Pre-Boarding Complete!",
+                    "body":    "All pre-boarding tasks are done. Everything is in place for a great Day 1.",
+                    "nextStep":"Day 1 is coming — confirm your start time and location with your manager.",
+                    "color":   "Good"
+                  }
+                }
+              }
+            },
+
+            "Day_1": {
+              "case": "Day 1",
+              "actions": {
+                "Set_Day1_Message": {
+                  "type": "Compose",
+                  "inputs": {
+                    "emoji":   "🌟",
+                    "headline":"Day 1 Complete!",
+                    "body":    "Amazing — you have completed your first day! We hope it was a great one.",
+                    "nextStep":"Your Week 1 tasks are now active. Check your onboarding portal.",
+                    "color":   "Accent"
+                  }
+                }
+              }
+            },
+
+            "Week_1": {
+              "case": "Week 1",
+              "actions": {
+                "Set_Week1_Message": {
+                  "type": "Compose",
+                  "inputs": {
+                    "emoji":   "🚀",
+                    "headline":"First Week Done!",
+                    "body":    "One full week in the books. You are making great progress!",
+                    "nextStep":"Your Month 1 tasks are now active. Focus on your role induction and first project.",
+                    "color":   "Accent"
+                  }
+                }
+              }
+            },
+
+            "Month_1": {
+              "case": "Month 1",
+              "actions": {
+                "Set_Month1_Message": {
+                  "type": "Compose",
+                  "inputs": {
+                    "emoji":   "🎯",
+                    "headline":"30-Day Milestone Reached!",
+                    "body":    "One month down! You are becoming a valued member of the team.",
+                    "nextStep":"Complete your 90-day tasks and schedule your probation review with your manager.",
+                    "color":   "Good"
+                  }
+                }
+              }
+            },
+
+            "90_Days": {
+              "case": "90 Days",
+              "actions": {
+                "Set_90Day_Message": {
+                  "type": "Compose",
+                  "inputs": {
+                    "emoji":   "🏆",
+                    "headline":"90-Day Onboarding Complete!",
+                    "body":    "You have successfully completed your onboarding program. Congratulations and welcome to the team — officially!",
+                    "nextStep":"Your manager will arrange your probation sign-off. We look forward to your continued growth.",
+                    "color":   "Good"
+                  }
+                }
+              }
+            }
+
+          },
+          "default": {
+            "actions": {
+              "Set_Default_Message": {
+                "type": "Compose",
+                "inputs": {
+                  "emoji":   "✅",
+                  "headline":"Phase Complete!",
+                  "body":    "All tasks in this phase are done. Great work!",
+                  "nextStep":"Check your onboarding portal for the next phase.",
+                  "color":   "Good"
+                }
+              }
+            }
+          }
+        },
+
+        "Send_Hire_Milestone_Email": {
+          "type": "ApiConnection",
+          "runAfter": { "Set_Phase_Milestone_Message": ["Succeeded"] },
+          "inputs": {
+            "host": { "connection": { "name": "@parameters('$connections')['office365']['connectionId']" } },
+            "method": "post",
+            "path": "/v2/Mail/Send",
+            "body": {
+              "To": "@coalesce(triggerBody()?['workEmail'], '')",
+              "Subject": "@{first(body('Set_Phase_Milestone_Message'))?['emoji']} @{first(body('Set_Phase_Milestone_Message'))?['headline']} — @{triggerBody()?['milestonePhase']} tasks all done!",
+              "Body": "<div style='font-family:Arial,sans-serif;max-width:600px'><div style='background:#27AE60;padding:20px;border-radius:8px 8px 0 0;text-align:center'><h1 style='color:#fff;font-size:32px;margin:0'>@{first(body('Set_Phase_Milestone_Message'))?['emoji']}</h1><h2 style='color:#fff;margin:8px 0 0'>@{first(body('Set_Phase_Milestone_Message'))?['headline']}</h2></div><div style='padding:24px;border:1px solid #eee;border-radius:0 0 8px 8px'><p>Hi @{triggerBody()?['employeeName']},</p><p>@{first(body('Set_Phase_Milestone_Message'))?['body']}</p><p><b>Overall progress: @{triggerBody()?['overallProgress']}%</b> (@{triggerBody()?['completedTasks']} of @{triggerBody()?['totalTasks']} tasks complete)</p><p><b>Next step:</b> @{first(body('Set_Phase_Milestone_Message'))?['nextStep']}</p></div></div>",
+              "IsHtml": true
+            }
+          }
+        },
+
+        "Notify_Manager_Milestone": {
+          "type": "ApiConnection",
+          "runAfter": { "Send_Hire_Milestone_Email": ["Succeeded"] },
+          "inputs": {
+            "host": { "connection": { "name": "@parameters('$connections')['office365']['connectionId']" } },
+            "method": "post",
+            "path": "/v2/Mail/Send",
+            "body": {
+              "To": "@triggerBody()?['managerEmail']",
+              "Subject": "@{first(body('Set_Phase_Milestone_Message'))?['emoji']} @{triggerBody()?['employeeName']} — @{triggerBody()?['milestonePhase']} Complete (@{triggerBody()?['overallProgress']}%)",
+              "Body": "<p>@{triggerBody()?['employeeName']} has completed all <b>@{triggerBody()?['milestonePhase']}</b> onboarding tasks.</p><p><b>Overall progress: @{triggerBody()?['overallProgress']}%</b></p><p>@{first(body('Set_Phase_Milestone_Message'))?['nextStep']}</p>",
+              "IsHtml": true
+            }
+          }
+        },
+
+        "Post_Milestone_to_Teams": {
+          "type": "Http",
+          "runAfter": { "Notify_Manager_Milestone": ["Succeeded"] },
+          "inputs": {
+            "method": "POST",
+            "uri": "@parameters('TeamsWebhookUrl')",
+            "body": {
+              "type": "message",
+              "attachments": [{
+                "contentType": "application/vnd.microsoft.card.adaptive",
+                "content": {
+                  "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
+                  "type": "AdaptiveCard",
+                  "version": "1.4",
+                  "body": [
+                    { "type": "Container", "style": "good", "items": [
+                      { "type": "TextBlock", "text": "@{first(body('Set_Phase_Milestone_Message'))?['emoji']} @{first(body('Set_Phase_Milestone_Message'))?['headline']}", "weight": "Bolder", "size": "Large", "color": "Good" }
+                    ]},
+                    { "type": "TextBlock", "text": "@{triggerBody()?['employeeName']} has completed all **@{triggerBody()?['milestonePhase']}** tasks!", "wrap": true, "weight": "Bolder" },
+                    { "type": "ProgressBar", "value": "@{div(triggerBody()?['overallProgress'], 100)}" },
+                    { "type": "TextBlock", "text": "@{triggerBody()?['overallProgress']}% of onboarding complete (@{triggerBody()?['completedTasks']}/@{triggerBody()?['totalTasks']} tasks)", "isSubtle": true }
+                  ]
+                }
+              }]
+            }
+          }
+        },
+
+        "Is_Onboarding_Complete": {
+          "type": "Condition",
+          "runAfter": { "Post_Milestone_to_Teams": ["Succeeded"] },
+          "expression": { "greaterOrEquals": ["@triggerBody()?['overallProgress']", 100] },
+          "actions": {
+            "Update_Employee_Status_to_Completed": {
+              "type": "Http",
+              "inputs": {
+                "method": "POST",
+                "uri": "https://api.quickbase.com/v1/records",
+                "headers": {
+                  "QB-Realm-Hostname": "@parameters('QBRealmHostname')",
+                  "Authorization": "QB-USER-TOKEN @{parameters('QBUserToken')}",
+                  "Content-Type": "application/json"
+                },
+                "body": {
+                  "to": "@parameters('QBEmployeesTableId')",
+                  "data": [{ "3": { "value": "@triggerBody()?['employeeRecordId']" }, "24": { "value": "Completed" } }]
+                }
+              }
+            },
+            "Notify_HR_Completion": {
+              "type": "ApiConnection",
+              "runAfter": { "Update_Employee_Status_to_Completed": ["Succeeded"] },
+              "inputs": {
+                "host": { "connection": { "name": "@parameters('$connections')['office365']['connectionId']" } },
+                "method": "post",
+                "path": "/v2/Mail/Send",
+                "body": {
+                  "To": "@parameters('HREmail')",
+                  "Subject": "🏆 Onboarding Complete: @{triggerBody()?['employeeName']}",
+                  "Body": "<p><b>@{triggerBody()?['employeeName']}</b> has completed all onboarding tasks and their status has been updated to <b>Completed</b>. Please archive the record and initiate any post-onboarding processes (e.g., remove probation flag from HRIS).</p>",
+                  "IsHtml": true
+                }
+              }
+            }
+          },
+          "else": { "actions": {} }
+        },
+
+        "Return_Success": {
+          "type": "Response",
+          "runAfter": { "Is_Onboarding_Complete": ["Succeeded"] },
+          "inputs": { "statusCode": 200, "body": { "result": "Milestone processed", "phase": "@triggerBody()?['milestonePhase']" } }
+        }
+
+      }
+    }
+  }
+}
